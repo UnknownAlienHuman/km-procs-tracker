@@ -1,0 +1,21 @@
+## Interface: 120000, 120001
+## Title: KM Procs Tracker
+## Notes: Tracks Killing Machine procs, consumption, and wasted (overcap) procs. Includes minimap button (LDB).
+## Author: Neomorph
+## Version: 0.3.46
+## SavedVariables: KMProcsTrackerDB
+## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
+
+libs/LibStub/LibStub.lua
+libs/CallbackHandler-1.0/CallbackHandler-1.0.lua
+libs/LibDataBroker-1.1/LibDataBroker-1.1.lua
+libs/LibDBIcon-1.0/lib.xml
+
+Core.lua
+Backend_CooldownViewer.lua
+UI.lua
+Minimap.lua
+DevTools/DevTools.lua
+DevTools/DevToolsUI.lua
+TestLab.lua
+
