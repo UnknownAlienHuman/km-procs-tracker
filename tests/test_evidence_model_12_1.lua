@@ -81,8 +81,8 @@ local function newAuraContainer(parent)
   return container
 end
 
-function canaccessvalue(value) return value ~= SECRET end
-function issecretvalue(value) return value == SECRET end
+function canaccessvalue(value) return not rawequal(value, SECRET) end
+function issecretvalue(value) return rawequal(value, SECRET) end
 function issecrettable() return false end
 function InCombatLockdown() return combat end
 
