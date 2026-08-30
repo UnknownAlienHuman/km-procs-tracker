@@ -1,10 +1,12 @@
-## Interface: 120000, 120001
+## Interface: 120100
 ## Title: KM Procs Tracker
-## Notes: Tracks Killing Machine procs, consumption, and wasted (overcap) procs. Includes minimap button (LDB).
+## Notes: Blizzard-managed Killing Machine display with exact spender-cast evidence for Retail 12.1.
 ## Author: Neomorph
-## Version: 0.3.46
+## Version: 0.4.0
 ## SavedVariables: KMProcsTrackerDB
+## Dependencies: Blizzard_AuraContainer
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
+## X-Verified-Build: 12.1.0.69497
 
 libs/LibStub/LibStub.lua
 libs/CallbackHandler-1.0/CallbackHandler-1.0.lua
@@ -12,10 +14,5 @@ libs/LibDataBroker-1.1/LibDataBroker-1.1.lua
 libs/LibDBIcon-1.0/lib.xml
 
 Core.lua
-Backend_CooldownViewer.lua
 UI.lua
 Minimap.lua
-DevTools/DevTools.lua
-DevTools/DevToolsUI.lua
-TestLab.lua
-
