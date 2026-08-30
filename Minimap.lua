@@ -1,77 +1,64 @@
--- Minimap.lua
--- KM Procs Tracker — minimap button using LDB + LibDBIcon
+-- KM Procs Tracker minimap launcher for Retail 12.1.
 
 local ADDON_NAME, Addon = ...
 Addon.Minimap = Addon.Minimap or {}
 local Minimap = Addon.Minimap
-
-local function GetDB()
-	return Addon:GetDB()
-end
-
-local function SpellTexture(spellID)
-	if C_Spell and C_Spell.GetSpellTexture then
-		return C_Spell.GetSpellTexture(spellID)
-	end
-	if GetSpellTexture then
-		return GetSpellTexture(spellID)
-	end
-	return "Interface\\Icons\\INV_Misc_QuestionMark"
-end
+local Access = Addon.Access
 
 local LDB = LibStub and LibStub:GetLibrary("LibDataBroker-1.1", true)
 local DBIcon = LibStub and LibStub:GetLibrary("LibDBIcon-1.0", true)
+local QUESTION_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 
-function Minimap:OnLogin()
-	if not (LDB and DBIcon) then return end
-
-	if self.launcher then
-		DBIcon:Refresh(ADDON_NAME, GetDB().minimap)
-		return
-	end
-
-	self:CreateLauncher()
-	DBIcon:Register(ADDON_NAME, self.launcher, GetDB().minimap)
-	DBIcon:Refresh(ADDON_NAME, GetDB().minimap)
+local function GetIcon()
+  if C_Spell and type(C_Spell.GetSpellTexture) == "function" then
+    local ok, value = pcall(C_Spell.GetSpellTexture, Addon.KM_SPELL_ID)
+    if ok and Access.CanAccess(value) then
+      local valueType = type(value)
+      if valueType == "number" or valueType == "string" then return value end
+    end
+  end
+  return QUESTION_ICON
 end
 
 function Minimap:CreateLauncher()
-	local iconTex = SpellTexture(Addon.KM_SPELL_ID)
-
-	self.launcher = LDB:NewDataObject(ADDON_NAME, {
-		type = "launcher",
-		text = "KM Procs Tracker",
-		icon = iconTex,
-
-		OnClick = function(_, button)
-			if button == "LeftButton" then
-				if Addon.UI and Addon.UI.ToggleShown then
-					Addon.UI:ToggleShown()
-				end
-			elseif button == "RightButton" then
-				Addon:ResetCounters()
-				if Addon.UI and Addon.UI.UpdateCounters then
-					Addon.UI:UpdateCounters()
-				end
-			end
-		end,
-
-		OnTooltipShow = function(tooltip)
-			if not tooltip or not tooltip.AddLine then return end
-			tooltip:AddLine("KM Procs Tracker")
-			tooltip:AddLine(("Procs: %d"):format(Addon.counters.procs), 1, 1, 1)
-			tooltip:AddLine(("Consumed: %d"):format(Addon.counters.consumed), 1, 1, 1)
-			tooltip:AddLine(("Wasted: %d"):format(Addon.counters.wasted), 1, 0.3, 0.3)
-			tooltip:AddLine(" ")
-			tooltip:AddLine("Left-click: show/hide", 0.8, 0.8, 0.8)
-			tooltip:AddLine("Right-click: reset counters", 0.8, 0.8, 0.8)
-		end,
-	})
+  if not LDB or self.launcher then return end
+  self.launcher = LDB:NewDataObject(ADDON_NAME, {
+    type = "launcher",
+    text = "KM Procs Tracker",
+    icon = GetIcon(),
+    OnClick = function(_, button)
+      if button == "LeftButton" then
+        if Addon.UI and Addon.UI.ToggleShown then Addon.UI:ToggleShown() end
+      elseif button == "RightButton" then
+        Addon:ResetCounters()
+      end
+    end,
+    OnTooltipShow = function(tooltip)
+      if not tooltip or type(tooltip.AddLine) ~= "function" then return end
+      local snapshot = Addon:GetEvidenceSnapshot()
+      tooltip:AddLine("KM Procs Tracker — evidence-safe")
+      tooltip:AddDoubleLine("Obliterate casts", tostring(snapshot.obliterateCasts), 1, 1, 1, 1, 1, 1)
+      tooltip:AddDoubleLine("Frostscythe casts", tostring(snapshot.frostscytheCasts), 1, 1, 1, 1, 1, 1)
+      tooltip:AddDoubleLine("Total spender casts", tostring(snapshot.spenderCasts), 1, 1, 1, 1, 1, 1)
+      tooltip:AddLine("KM proc/use/expired/overcap counts: unavailable", 1, 0.82, 0, true)
+      tooltip:AddLine(" ")
+      tooltip:AddLine("Left-click: show/hide", 0.8, 0.8, 0.8)
+      tooltip:AddLine("Right-click: reset exact counters", 0.8, 0.8, 0.8)
+    end,
+  })
 end
 
-function Minimap:SetIconHidden(hidden)
-	if not (DBIcon and self.launcher) then return end
-	local db = GetDB()
-	db.minimap.hide = hidden and true or false
-	DBIcon:Refresh(ADDON_NAME, db.minimap)
+function Minimap:OnLogin()
+  if not (LDB and DBIcon) then return end
+  self:CreateLauncher()
+  if not self.registered then
+    DBIcon:Register(ADDON_NAME, self.launcher, Addon:GetDB().minimap)
+    self.registered = true
+  end
+  self:Refresh()
+end
+
+function Minimap:Refresh()
+  if not (DBIcon and self.launcher and self.registered) then return end
+  DBIcon:Refresh(ADDON_NAME, Addon:GetDB().minimap)
 end
