@@ -1,4 +1,4 @@
--- KM Procs Tracker UI for Retail 12.1.
+-- KM Procs Tracker UI for Retail 12.1.5.
 -- The Killing Machine state is rendered by Blizzard's managed AuraContainer.
 -- This file never queries aura assignment, visibility, stacks, duration, or
 -- managed-button state.
@@ -9,24 +9,28 @@ local UI = Addon.UI
 local Access = Addon.Access
 
 local BASE_SIZE = 44
-local QUESTION_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 local SLOT_KEY = "killing_machine"
+local AURA_INIT_UNINITIALIZED = "uninitialized"
+local AURA_INIT_PENDING = "pending"
+local AURA_INIT_READY = "ready"
+local AURA_INIT_FAILED = "failed"
+
+local function FailManagedAura(ui, container)
+  if container and type(container.Hide) == "function" then pcall(container.Hide, container) end
+  ui.pendingInit = false
+  ui.pendingAuraEnabled = nil
+  ui.auraInitState = AURA_INIT_FAILED
+  ui.auraUnavailable = true
+  ui.appliedAuraEnabled = nil
+end
 
 local function GetDB()
   return Addon:GetDB()
 end
 
-local function GetKMTexture()
-  if C_Spell and type(C_Spell.GetSpellTexture) == "function" then
-    for _, spellID in ipairs(Addon.KM_AURA_IDS) do
-      local ok, value = pcall(C_Spell.GetSpellTexture, spellID)
-      if ok and Access.CanAccess(value) then
-        local valueType = type(value)
-        if valueType == "number" or valueType == "string" then return value end
-      end
-    end
-  end
-  return QUESTION_ICON
+local function Round(value)
+  if value >= 0 then return math.floor(value + 0.5) end
+  return math.ceil(value - 0.5)
 end
 
 local function InitializeManagedButton(button, container)
@@ -54,49 +58,65 @@ local function InitializeManagedButton(button, container)
 end
 
 function UI:CreateManagedAura()
-  if self.auraContainer then return true end
+  self.auraInitState = self.auraInitState or AURA_INIT_UNINITIALIZED
+  if self.auraInitState == AURA_INIT_READY and self.auraContainer then return true end
+  if self.auraInitState == AURA_INIT_FAILED then return false end
+
   if InCombatLockdown() then
     self.pendingInit = true
+    self.auraInitState = AURA_INIT_PENDING
     return false
   end
   if not self.frame then return false end
 
   local ok, container = pcall(CreateFrame, "AuraContainer", nil, self.frame, "CustomAuraContainerTemplate")
   if not ok or not container then
-    self.auraUnavailable = true
+    FailManagedAura(self)
     return false
   end
 
-  container:SetAllPoints(self.frame)
-  container:SetUnit("player")
-
-  local includeSpellIDs = {}
-  for _, spellID in ipairs(Addon.KM_AURA_IDS) do includeSpellIDs[spellID] = true end
+  -- Retain the one attempted container before AddAuraSlot. If the API contract
+  -- is unavailable, later enable/apply calls fail closed instead of leaking a
+  -- new frame on every retry.
+  self.auraContainer = container
+  local configured = pcall(function()
+    container:SetAllPoints(self.frame)
+    container:SetUnit("player")
+  end)
+  if not configured then
+    FailManagedAura(self, container)
+    return false
+  end
 
   local options = {
     initializeFrame = function(button)
       InitializeManagedButton(button, container)
     end,
     candidateFilters = {
-      includeSpellIDs = includeSpellIDs,
+      -- 51128 is the passive talent, not the timed proc aura.
+      includeSpellIDs = { [Addon.KM_SPELL_ID] = true },
     },
     sortMethod = AuraContainerSortMethod and AuraContainerSortMethod.Default or nil,
     sortDirection = AuraContainerSortDirection and AuraContainerSortDirection.Normal or nil,
   }
 
-  local added = pcall(container.AddAuraSlot, container, SLOT_KEY, "HELPFUL", options)
-  if not added then
-    container:Hide()
-    self.auraUnavailable = true
+  local added, auraFrame = pcall(container.AddAuraSlot, container, SLOT_KEY, "HELPFUL", options)
+  if not added or not auraFrame then
+    FailManagedAura(self, container)
     return false
   end
 
-  self.auraContainer = container
-  self.auraUnavailable = false
+  local enabled = Addon:IsEnabled()
+  local applied = pcall(container.SetEnabled, container, enabled)
+  if not applied then
+    FailManagedAura(self, container)
+    return false
+  end
+
   self.pendingInit = false
-  container:SetEnabled(Addon:IsEnabled())
-  container:Show()
-  if type(container.UpdateAllAuras) == "function" then container:UpdateAllAuras() end
+  self.auraInitState = AURA_INIT_READY
+  self.auraUnavailable = false
+  self.appliedAuraEnabled = enabled
   return true
 end
 
@@ -122,12 +142,18 @@ function UI:CreateFrame()
   local placeholder = frame:CreateTexture(nil, "BACKGROUND")
   self.placeholder = placeholder
   placeholder:SetAllPoints(frame)
-  placeholder:SetTexture(GetKMTexture())
+  placeholder:SetTexture(Addon:GetIcon())
   placeholder:SetTexCoord(0.08, 0.92, 0.08, 0.92)
   placeholder:SetAlpha(0.20)
   placeholder:SetDesaturated(true)
 
-  local exactText = frame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+  -- An ordinary sibling of the managed container keeps cast text above its
+  -- icon/cooldown without retaining or mutating any adopted aura child.
+  local counterFrame = CreateFrame("Frame", nil, frame)
+  counterFrame:SetAllPoints(frame)
+  counterFrame:SetFrameLevel(frame:GetFrameLevel() + 5)
+  counterFrame:EnableMouse(false)
+  local exactText = counterFrame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
   self.exactText = exactText
   exactText:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
   exactText:SetText("0")
@@ -138,28 +164,35 @@ function UI:CreateFrame()
     local db = GetDB()
     if not db or db.frame.locked or InCombatLockdown() then return end
     self:StartMoving()
+    UI.isDragging = true
   end)
-  frame:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    UI:SavePosition()
-  end)
+  frame:SetScript("OnDragStop", function() UI:StopMoving() end)
   frame:SetScript("OnClick", function(_, button)
     if button == "RightButton" then UI:ShowContextMenu() end
   end)
 end
 
 function UI:OnLogin()
-  self:CreateFrame()
   self:ApplyDB()
-  self:CreateManagedAura()
-  self:UpdateCounters()
+end
+
+function UI:StopMoving()
+  if not self.isDragging then return end
+  if InCombatLockdown() then
+    self.pendingDragStop = true
+    return
+  end
+  self.frame:StopMovingOrSizing()
+  self.isDragging = false
+  self.pendingDragStop = false
+  self:SavePosition()
 end
 
 function UI:SavePosition()
   if not self.frame or InCombatLockdown() then return end
   local point, _, relativePoint, x, y = self.frame:GetPoint(1)
-  point = Access.SafeString(point)
-  relativePoint = Access.SafeString(relativePoint)
+  point = Access.SafePoint(point)
+  relativePoint = Access.SafePoint(relativePoint)
   x = Access.SafeNumber(x)
   y = Access.SafeNumber(y)
   if not point or not relativePoint or not x or not y then return end
@@ -167,58 +200,113 @@ function UI:SavePosition()
   local db = GetDB()
   db.frame.point = point
   db.frame.relativePoint = relativePoint
-  db.frame.x = math.floor(x + 0.5)
-  db.frame.y = math.floor(y + 0.5)
+  -- Persist offsets in UIParent units, independent of the current icon scale.
+  -- Use the applied scale: a combat-deferred setting may already have changed.
+  local scale = self.appliedScale or 1
+  db.frame.x = Round(x * scale)
+  db.frame.y = Round(y * scale)
 end
 
 function UI:ApplyDB()
-  if not self.frame then return end
   if InCombatLockdown() then
     self.pendingApply = true
     return
   end
 
+  self:CreateFrame()
+  self:StopMoving()
   local db = GetDB()
   self.pendingApply = false
+  self.appliedScale = db.frame.scale
+  self.frame:SetScale(self.appliedScale)
   self.frame:ClearAllPoints()
-  self.frame:SetPoint(db.frame.point, UIParent, db.frame.relativePoint, db.frame.x, db.frame.y)
-  self.frame:SetScale(1)
-  local size = math.floor(BASE_SIZE * db.frame.scale + 0.5)
-  self.frame:SetSize(size, size)
-  self.frame:EnableMouse(not db.frame.locked or db.frame.shown)
+  self.frame:SetPoint(db.frame.point, UIParent, db.frame.relativePoint,
+    db.frame.x / self.appliedScale, db.frame.y / self.appliedScale)
+  self.frame:SetSize(BASE_SIZE, BASE_SIZE)
+  self.frame:EnableMouse(true)
   self.frame:SetShown(db.frame.shown)
   self:SetAuraEnabled(db.enabled)
+  self:UpdateCounters()
 end
 
 function UI:FlushPending()
   if InCombatLockdown() then return end
-  if self.pendingInit then self:CreateManagedAura() end
-  if self.pendingApply then self:ApplyDB() end
+  if self.pendingDragStop then self:StopMoving() end
+
+  if self.pendingInit then
+    if Addon:IsEnabled() then
+      self:CreateManagedAura()
+    else
+      self.pendingInit = false
+      if self.auraInitState == AURA_INIT_PENDING then
+        self.auraInitState = AURA_INIT_UNINITIALIZED
+      end
+    end
+  end
+
+  if self.pendingApply then
+    self:ApplyDB()
+  elseif self.pendingAuraEnabled ~= nil then
+    local enabled = self.pendingAuraEnabled
+    self.pendingAuraEnabled = nil
+    self:SetAuraEnabled(enabled)
+  end
 end
 
 function UI:SetAuraEnabled(enabled)
-  if self.placeholder then self.placeholder:SetShown(enabled == true) end
-  if self.auraContainer then
-    self.auraContainer:SetEnabled(enabled == true)
-    self.auraContainer:SetShown(enabled == true)
-    if enabled and type(self.auraContainer.UpdateAllAuras) == "function" then
-      self.auraContainer:UpdateAllAuras()
+  enabled = enabled == true
+  if self.placeholder then self.placeholder:SetShown(enabled) end
+
+  if InCombatLockdown() then
+    self.pendingAuraEnabled = enabled
+    if enabled and self.auraInitState ~= AURA_INIT_READY and self.auraInitState ~= AURA_INIT_FAILED then
+      self.pendingInit = true
+      self.auraInitState = AURA_INIT_PENDING
+    elseif not enabled and self.auraInitState == AURA_INIT_PENDING then
+      self.pendingInit = false
+      self.auraInitState = AURA_INIT_UNINITIALIZED
     end
-  elseif enabled then
+    return
+  end
+
+  self.pendingAuraEnabled = nil
+  if not enabled and self.auraInitState == AURA_INIT_PENDING then
+    self.pendingInit = false
+    self.auraInitState = AURA_INIT_UNINITIALIZED
+  end
+
+  if self.auraInitState == AURA_INIT_READY and self.auraContainer then
+    if self.appliedAuraEnabled ~= enabled then
+      local applied = pcall(self.auraContainer.SetEnabled, self.auraContainer, enabled)
+      if not applied then
+        FailManagedAura(self, self.auraContainer)
+        return
+      end
+      self.appliedAuraEnabled = enabled
+    end
+  elseif enabled and self.auraInitState ~= AURA_INIT_FAILED then
     self:CreateManagedAura()
   end
 end
 
 function UI:UpdateCounters()
   if not self.exactText then return end
-  local snapshot = Addon:GetEvidenceSnapshot()
-  self.exactText:SetText(tostring(snapshot.spenderCasts))
+  local total = GetDB().exact.spenderCasts
+  if self.displayedCastCount == total then return end
+  self.displayedCastCount = total
+  self.exactText:SetText(tostring(total))
 end
 
 function UI:SetShown(shown)
   local db = GetDB()
   db.frame.shown = shown == true
-  if self.frame then self.frame:SetShown(db.frame.shown) end
+  if not self.frame then return end
+  if InCombatLockdown() then
+    self.pendingApply = true
+    return
+  end
+  if not db.frame.shown then self:StopMoving() end
+  self.frame:SetShown(db.frame.shown)
 end
 
 function UI:ToggleShown()

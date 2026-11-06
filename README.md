@@ -1,92 +1,91 @@
 # KM Procs Tracker
 
-Retail 12.1 evidence-safe Killing Machine display for Frost Death Knights.
+Evidence-safe Killing Machine display for Frost Death Knights on World of Warcraft Retail 12.1.5.
 
-The addon keeps the original project name, but it no longer claims exact Killing Machine proc, consumption, expiration, stack, or overcap counts. Retail 12.1 does not expose those values as a reliable general-purpose addon data source. Instead, it combines:
+The addon combines:
 
 - a Blizzard-managed Killing Machine aura display;
 - exact successful player casts of Obliterate and Frostscythe;
-- explicit `unavailable` labels for metrics that cannot be proven.
+- explicit `unavailable` labels for metrics the addon cannot prove.
 
 ## Compatibility
 
-- Game: World of Warcraft Retail / Midnight 12.1.0
-- Interface: `120100`
-- Version: `0.4.0`
-- Verified Blizzard source baseline: `12.1.0.69497`
-- SavedVariables: `KMProcsTrackerDB`
-- Required Blizzard addon: `Blizzard_AuraContainer`
-- Bundled libraries: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
+- Retail / Midnight `12.1.5`
+- Interface `120105`
+- addon version `0.5.1`
+- inspected source baseline `12.1.5.70783`; live-client validation **NOT-RUN**
+- source snapshot `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
+- required Blizzard addon `Blizzard_AuraContainer`
+- SavedVariables `KMProcsTrackerDB`
 
-## What is exact
+## Exact data
 
-`UNIT_SPELLCAST_SUCCEEDED` is registered for `player`. When its spell ID is accessible and equals:
+The addon counts accessible successful `player` casts of:
 
-- `49020` — Obliterate;
-- `207230` — Frostscythe;
+- Obliterate (`49020`)
+- Frostscythe (`207230`)
 
-the corresponding cast counter increments. These are exact successful player-cast counts since the last reset. They are **not** labelled as Killing Machine consumption because the addon cannot legally correlate the cast with hidden managed aura state.
+These counters do **not** claim that Killing Machine was active or consumed.
 
-## Managed Killing Machine display
+## Managed aura display
 
-The tracker creates one `CustomAuraContainerTemplate` for `player` and one `AddAuraSlot` with `HELPFUL` filtering and `includeSpellIDs` for `51124` and `51128`.
+One `CustomAuraContainerTemplate` slot filters player `HELPFUL` auras to the Killing Machine proc aura `51124`. Passive talent `51128` is not an alternate proc aura. Blizzard owns visibility, stack count, duration, refresh, and restricted state. The addon only supplies native icon, application-count, and duration-cooldown display sinks.
 
-The managed AuraButton receives Blizzard-supported display sinks:
+The managed button is never queried after initialization, and the addon does not manually call `UpdateAllAuras`.
 
-- icon;
-- application count;
-- duration cooldown;
-- static addon glow art.
+## Intentionally unavailable
 
-The addon does not retain or query the managed button. Blizzard owns assignment, visibility, stacks, duration, refresh, secrecy, and private state. A dim static icon behind the managed button is only a neutral placeholder; it is not an inactive/active-state inference.
-
-## Metrics intentionally unavailable
-
-The UI and minimap tooltip explicitly mark these as unavailable rather than displaying guessed numbers:
+The addon does not fabricate numeric values for:
 
 - Killing Machine proc count;
-- casts that actually consumed Killing Machine;
+- KM-attributed consumption;
 - expiration count;
-- overcap/wasted count;
+- overcap/waste count;
 - current stack count.
 
-The removed 0.3.x implementation attempted to derive those values from raw aura scans, combat-log ordering, SpellActivationOverlay frame counts, action-button glows, Cooldown Viewer recycling, timing windows, attack-speed credit and locally simulated stacks. Those paths could disagree, freeze, double-count, or expose restricted state. Legacy approximate counters are not migrated into the new exact counters.
+The removed 0.3.x model inferred these from aura scans, overlays, action-button glows, Cooldown Viewer frames, combat-log ordering, and timing windows. Those signals could freeze, double-count, or expose restricted state, so legacy approximate counters are not migrated into exact data.
 
-## Commands
+## Controls
 
-- `/kmpt` — show or hide the tracker;
-- `/kmpt show` / `/kmpt hide`;
-- `/kmpt toggle` — enable or disable managed display and counting;
-- `/kmpt reset` — reset exact cast counters;
-- `/kmpt lock` / `/kmpt unlock`;
-- `/kmpt scale 0.60..3.00`;
-- `/kmpt minimap show|hide`;
-- `/kmpt status` — print exact cast counts and unavailable metric status.
+- `/kmpt` — show/hide the frame
+- `/kmpt show|hide`
+- `/kmpt toggle` — enable/disable display and counting
+- `/kmpt reset` — reset exact cast counters
+- `/kmpt lock|unlock`
+- `/kmpt scale 0.60..3.00`
+- `/kmpt minimap show|hide`
+- `/kmpt status`
 
-Right-click the tracker for enable/disable, reset, lock, scale, and hide controls. Right-click the minimap icon resets exact counters.
+Right-click the tracker for enable/disable, reset, lock, scale, and hide controls. Left-click the minimap icon toggles the frame; right-click resets exact counters. Scaling applies to the icon, glow, cooldown, and text together; saved offsets remain independent of scale.
 
-## Combat and data safety
+## Safety and performance
 
-- no `UNIT_AURA`;
-- no `C_UnitAuras`, `UnitAura`, raw AuraData, combat-log, action-button-glow, SpellActivationOverlay, Cooldown Viewer, child-frame, or visibility scans;
-- inaccessible event values are rejected before comparison or conversion;
-- managed AuraContainer initialization is deferred when combat is active;
-- position/scale application is deferred to `PLAYER_REGEN_ENABLED`;
-- no GitHub Actions workflow is added.
+- inaccessible event values and unknown access decisions are rejected before comparison or conversion;
+- invalid SavedVariables anchors and numeric values are repaired or clamped;
+- exact aggregate counts are recomputed from per-spell counters;
+- tracker creation, managed enable-state changes, and drag completion defer during combat;
+- managed initialization fails closed without repeated frame allocation;
+- disabled addons unsubscribe from cast events; bootstrap events unregister after initialization;
+- exact cast text uses an independent addon-owned layer, skips unchanged writes, and does not allocate a snapshot per cast;
+- no raw aura API, combat log, overlay, action-bar, Cooldown Viewer, frame-tree scan, ticker, `OnUpdate`, or manual managed refresh path.
 
-## Validation status
+## Validation
 
-`tests/test_evidence_model_12_1.lua` is a local deterministic regression for:
+```text
+texlua --luaconly Core.lua
+texlua --luaconly UI.lua
+texlua --luaconly Minimap.lua
+texlua --luaconly tests/test_evidence_model_12_1_5.lua
+texlua tests/test_evidence_model_12_1_5.lua
+```
 
-- legacy approximate counters not entering exact data;
-- combat-deferred AuraContainer creation;
-- managed spell-ID candidate filters and display sinks;
-- absence of `UNIT_AURA` and combat-log registration;
-- exact accessible Obliterate/Frostscythe counting;
-- inaccessible spell ID rejection;
-- disabled-state and reset behavior.
+The regression loads all three runtime modules against a mocked WoW API. It checks migration, exact counts, access rejection, post-adoption object isolation, scale/drag deferral, coalesced changes, initialization failures, and the LDB/DBIcon consumer contract. Successful output begins:
 
-The test is part of the repository but is not a substitute for live Retail validation. The current client still requires verification of the managed AuraContainer, aura visuals, casts, frame placement/scale, minimap behavior, reload migration, taint, errors, and CPU/allocation behavior.
+```text
+PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender casts become exact counters
+```
+
+The offline regression does not replace live Retail validation of visuals, spell-ID matching, combat behavior, bundled-library behavior, taint, errors, and profiler results. No runtime performance or compatibility pass is claimed by the source-build metadata.
 
 ## Developer documentation
 

@@ -1,12 +1,12 @@
-## Interface: 120100
+## Interface: 120105
 ## Title: KM Procs Tracker
-## Notes: Blizzard-managed Killing Machine display with exact spender-cast evidence for Retail 12.1.
+## Notes: Blizzard-managed Killing Machine display with exact spender-cast evidence for Retail 12.1.5.
 ## Author: Neomorph
-## Version: 0.4.0
+## Version: 0.5.1
 ## SavedVariables: KMProcsTrackerDB
 ## Dependencies: Blizzard_AuraContainer
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
-## X-Verified-Build: 12.1.0.69497
+## X-Source-Build: 12.1.5.70783
 
 libs/LibStub/LibStub.lua
 libs/CallbackHandler-1.0/CallbackHandler-1.0.lua

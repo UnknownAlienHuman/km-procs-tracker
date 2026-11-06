@@ -1,4 +1,4 @@
--- KM Procs Tracker runtime owner for Retail 12.1.
+-- KM Procs Tracker runtime owner for Retail 12.1.5.
 --
 -- Evidence contract:
 --   * exact: successful player casts with accessible spell IDs;
@@ -10,23 +10,15 @@
 local ADDON_NAME, Addon = ...
 _G[ADDON_NAME] = Addon
 
-Addon.VERSION = "0.4.0"
+Addon.VERSION = "0.5.1"
 Addon.DB_VERSION = 4
 Addon.DB_NAME = "KMProcsTrackerDB"
-Addon.KM_AURA_IDS = { 51124, 51128 }
 Addon.KM_SPELL_ID = 51124
 
-Addon.SPENDERS = {
-  [49020] = "Obliterate",
-  [207230] = "Frostscythe",
-}
-
-Addon.UNAVAILABLE_METRICS = {
-  "Killing Machine proc count",
-  "casts that actually consumed Killing Machine",
-  "expired Killing Machine applications",
-  "overcap/wasted Killing Machine applications",
-  "current Killing Machine stack count",
+-- Spell-to-counter mapping is independent of Killing Machine presence.
+local COUNTER_BY_SPELL = {
+  [49020] = "obliterateCasts",
+  [207230] = "frostscytheCasts",
 }
 
 local DEFAULT_DB = {
@@ -55,6 +47,44 @@ local DEFAULT_DB = {
   },
 }
 
+local VALID_POINTS = {
+  TOPLEFT = true,
+  TOP = true,
+  TOPRIGHT = true,
+  LEFT = true,
+  CENTER = true,
+  RIGHT = true,
+  BOTTOMLEFT = true,
+  BOTTOM = true,
+  BOTTOMRIGHT = true,
+}
+
+local MAX_EXACT_INTEGER = 9007199254740991
+local EventFrame
+local castsRegistered = false
+
+local function UpdateCastRegistration()
+  local enabled = Addon.db and Addon.db.enabled == true
+  if enabled == castsRegistered then return end
+  if enabled then
+    EventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+  else
+    EventFrame:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+  end
+  castsRegistered = enabled
+end
+
+local function SaturatingAdd(left, right)
+  local total = left + right
+  if total > MAX_EXACT_INTEGER then return MAX_EXACT_INTEGER end
+  return total
+end
+
+local function IncrementCounter(value)
+  if value >= MAX_EXACT_INTEGER then return MAX_EXACT_INTEGER end
+  return value + 1
+end
+
 local function CanAccess(value)
   if type(canaccessvalue) == "function" then
     local ok, accessible = pcall(canaccessvalue, value)
@@ -62,9 +92,9 @@ local function CanAccess(value)
   end
   if type(issecretvalue) == "function" then
     local ok, secret = pcall(issecretvalue, value)
-    return ok and secret ~= true
+    return ok and secret == false
   end
-  return true
+  return false
 end
 
 local function SafeBoolean(value)
@@ -73,7 +103,8 @@ local function SafeBoolean(value)
 end
 
 local function SafeNumber(value)
-  if not CanAccess(value) or type(value) ~= "number" or value ~= value then return nil end
+  if not CanAccess(value) or type(value) ~= "number" then return nil end
+  if value ~= value or value == math.huge or value == -math.huge then return nil end
   return value
 end
 
@@ -86,7 +117,7 @@ local function SafeTable(value)
   if not CanAccess(value) or type(value) ~= "table" then return nil end
   if type(issecrettable) == "function" then
     local ok, secret = pcall(issecrettable, value)
-    if not ok or secret == true then return nil end
+    if not ok or secret ~= false then return nil end
   end
   return value
 end
@@ -99,13 +130,22 @@ local function SafeText(value, fallback)
   return fallback or "<unavailable>"
 end
 
+local function SafePoint(value, fallback)
+  value = SafeString(value)
+  if value and VALID_POINTS[value] then return value end
+  return fallback
+end
+
 local function MergeDefaults(destination, source)
   destination = SafeTable(destination) or {}
   for key, value in pairs(source) do
     if type(value) == "table" then
       destination[key] = MergeDefaults(destination[key], value)
-    elseif type(destination[key]) ~= type(value) then
-      destination[key] = value
+    else
+      local current = destination[key]
+      if not CanAccess(current) or type(current) ~= type(value) then
+        destination[key] = value
+      end
     end
   end
   return destination
@@ -119,13 +159,20 @@ local function ClampNumber(value, fallback, minimum, maximum)
   return value
 end
 
+local function SanitizeCounter(value)
+  value = SafeNumber(value)
+  if not value or value <= 0 then return 0 end
+  if value > MAX_EXACT_INTEGER then value = MAX_EXACT_INTEGER end
+  return math.floor(value)
+end
+
 local function SanitizeDB(db)
   db.version = Addon.DB_VERSION
   db.enabled = SafeBoolean(db.enabled) ~= false
 
   db.frame = SafeTable(db.frame) or {}
-  db.frame.point = SafeString(db.frame.point) or "CENTER"
-  db.frame.relativePoint = SafeString(db.frame.relativePoint) or "CENTER"
+  db.frame.point = SafePoint(db.frame.point, "CENTER")
+  db.frame.relativePoint = SafePoint(db.frame.relativePoint, "CENTER")
   db.frame.x = ClampNumber(db.frame.x, 0, -4000, 4000)
   db.frame.y = ClampNumber(db.frame.y, 0, -4000, 4000)
   db.frame.scale = ClampNumber(db.frame.scale, 1.0, 0.60, 3.00)
@@ -137,9 +184,11 @@ local function SanitizeDB(db)
   db.minimap.minimapPos = ClampNumber(db.minimap.minimapPos, 220, 0, 360)
 
   db.exact = SafeTable(db.exact) or {}
-  db.exact.spenderCasts = math.max(0, math.floor((SafeNumber(db.exact.spenderCasts) or 0) + 0.5))
-  db.exact.obliterateCasts = math.max(0, math.floor((SafeNumber(db.exact.obliterateCasts) or 0) + 0.5))
-  db.exact.frostscytheCasts = math.max(0, math.floor((SafeNumber(db.exact.frostscytheCasts) or 0) + 0.5))
+  db.exact.obliterateCasts = SanitizeCounter(db.exact.obliterateCasts)
+  db.exact.frostscytheCasts = SanitizeCounter(db.exact.frostscytheCasts)
+  -- The aggregate is derived, never trusted independently. This prevents drift
+  -- after interrupted writes, hand-edited SavedVariables, or partial corruption.
+  db.exact.spenderCasts = SaturatingAdd(db.exact.obliterateCasts, db.exact.frostscytheCasts)
 
   db.migration = SafeTable(db.migration) or {}
   db.migration.retiredApproximateCounters = SafeBoolean(db.migration.retiredApproximateCounters) == true
@@ -150,11 +199,14 @@ local function MigrateLegacy(db)
   if version == Addon.DB_VERSION then return db end
 
   local migrated = MergeDefaults({}, DEFAULT_DB)
+  local legacyEnabled = SafeBoolean(db.enabled)
   local legacyFrame = SafeTable(db.frame)
   local legacyMinimap = SafeTable(db.minimap)
+
+  if legacyEnabled ~= nil then migrated.enabled = legacyEnabled end
   if legacyFrame then
-    migrated.frame.point = SafeString(legacyFrame.point) or migrated.frame.point
-    migrated.frame.relativePoint = SafeString(legacyFrame.relativePoint) or migrated.frame.relativePoint
+    migrated.frame.point = SafePoint(legacyFrame.point, migrated.frame.point)
+    migrated.frame.relativePoint = SafePoint(legacyFrame.relativePoint, migrated.frame.relativePoint)
     migrated.frame.x = SafeNumber(legacyFrame.x) or migrated.frame.x
     migrated.frame.y = SafeNumber(legacyFrame.y) or migrated.frame.y
     migrated.frame.scale = SafeNumber(legacyFrame.scale) or migrated.frame.scale
@@ -169,7 +221,7 @@ local function MigrateLegacy(db)
 
   -- Previous Procs/Used/Expired/Overcap values were derived from raw aura,
   -- overlay, cooldown-viewer, and timing heuristics. They are deliberately not
-  -- copied into the new exact counters.
+  -- copied into the exact successful-cast counters.
   migrated.migration.retiredApproximateCounters = true
   return migrated
 end
@@ -194,13 +246,26 @@ function Addon:Chatf(formatString, ...)
   self:Chat(ok and text or safeFormat)
 end
 
+function Addon:GetIcon()
+  if C_Spell and type(C_Spell.GetSpellTexture) == "function" then
+    local ok, value = pcall(C_Spell.GetSpellTexture, self.KM_SPELL_ID)
+    if ok and CanAccess(value) then
+      local valueType = type(value)
+      if valueType == "number" or valueType == "string" then return value end
+    end
+  end
+  return "Interface\\Icons\\INV_Misc_QuestionMark"
+end
+
 function Addon:InitDB()
-  local db = SafeTable(_G[self.DB_NAME]) or {}
-  db = MigrateLegacy(db)
+  local db = SafeTable(_G[self.DB_NAME])
+  -- A fresh install has no approximate counters to retire.
+  if db then db = MigrateLegacy(db) end
   db = MergeDefaults(db, DEFAULT_DB)
   SanitizeDB(db)
   _G[self.DB_NAME] = db
   self.db = db
+  UpdateCastRegistration()
 end
 
 function Addon:IsEnabled()
@@ -209,9 +274,13 @@ end
 
 function Addon:SetEnabled(enabled)
   if not self.db then return end
-  self.db.enabled = enabled == true
-  if self.UI and self.UI.ApplyDB then self.UI:ApplyDB() end
-  if self.UI and self.UI.SetAuraEnabled then self.UI:SetAuraEnabled(self.db.enabled) end
+  enabled = enabled == true
+  if self.db.enabled == enabled then return end
+  self.db.enabled = enabled
+  UpdateCastRegistration()
+  if self.UI and self.UI.SetAuraEnabled then
+    self.UI:SetAuraEnabled(self.db.enabled)
+  end
 end
 
 function Addon:GetEvidenceSnapshot()
@@ -235,17 +304,12 @@ end
 function Addon:RecordSuccessfulCast(spellID)
   spellID = SafeNumber(spellID)
   if not spellID or not self:IsEnabled() then return false end
-  spellID = math.floor(spellID + 0.5)
-  local spender = self.SPENDERS[spellID]
-  if not spender then return false end
+  local counter = COUNTER_BY_SPELL[spellID]
+  if not counter then return false end
 
   local exact = self.db.exact
-  exact.spenderCasts = exact.spenderCasts + 1
-  if spellID == 49020 then
-    exact.obliterateCasts = exact.obliterateCasts + 1
-  elseif spellID == 207230 then
-    exact.frostscytheCasts = exact.frostscytheCasts + 1
-  end
+  exact[counter] = IncrementCounter(exact[counter])
+  exact.spenderCasts = SaturatingAdd(exact.obliterateCasts, exact.frostscytheCasts)
 
   if self.UI and self.UI.UpdateCounters then self.UI:UpdateCounters() end
   return true
@@ -290,9 +354,13 @@ function Addon:SlashCommand(message)
       self:Chat("KMPT: /kmpt scale 0.60..3.00")
     end
   elseif command == "minimap" then
-    if argument == "show" then self:SetMinimapHidden(false)
-    elseif argument == "hide" then self:SetMinimapHidden(true)
-    else self:SetMinimapHidden(not self.db.minimap.hide) end
+    if argument == "show" then
+      self:SetMinimapHidden(false)
+    elseif argument == "hide" then
+      self:SetMinimapHidden(true)
+    else
+      self:SetMinimapHidden(not self.db.minimap.hide)
+    end
   elseif command == "status" then
     local snapshot = self:GetEvidenceSnapshot()
     self:Chatf(
@@ -313,26 +381,23 @@ Addon.Access = {
   SafeString = SafeString,
   SafeTable = SafeTable,
   SafeText = SafeText,
+  SafePoint = SafePoint,
 }
 
-local EventFrame = CreateFrame("Frame")
+EventFrame = CreateFrame("Frame")
 EventFrame:RegisterEvent("ADDON_LOADED")
 EventFrame:RegisterEvent("PLAYER_LOGIN")
 EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-if type(EventFrame.RegisterUnitEvent) == "function" then
-  EventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
-else
-  EventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-end
-
 EventFrame:SetScript("OnEvent", function(_, event, ...)
   if event == "ADDON_LOADED" then
     local loadedAddon = ...
     if SafeString(loadedAddon) ~= ADDON_NAME then return end
     Addon:InitDB()
+    EventFrame:UnregisterEvent("ADDON_LOADED")
     SLASH_KMPROCSTRACKER1 = "/kmpt"
     SlashCmdList.KMPROCSTRACKER = function(message) Addon:SlashCommand(message) end
   elseif event == "PLAYER_LOGIN" then
+    EventFrame:UnregisterEvent("PLAYER_LOGIN")
     if not Addon.db then Addon:InitDB() end
     if Addon.UI and Addon.UI.OnLogin then Addon.UI:OnLogin() end
     if Addon.Minimap and Addon.Minimap.OnLogin then Addon.Minimap:OnLogin() end
