@@ -11,13 +11,13 @@ flowchart LR
   C --> X["exact Obliterate/Frostscythe counters"]
   X --> U
   X --> M
-  U --> S["addon-owned neutral stable frame"]
   U --> A["Blizzard CustomAuraContainer"]
-  A --> AS["AddAuraSlot HELPFUL 51124/51128"]
-  AS --> D["managed icon/count/duration sinks"]
+  A --> S["HELPFUL slot: 51124 / 51128"]
+  S --> D["native icon / count / duration sinks"]
   R["PLAYER_REGEN_ENABLED"] --> U
-  Z["tests/test_evidence_model_12_1.lua"] --> C
+  F["one-shot init state"] --> U
+  Z["test_evidence_model_12_1_5.lua"] --> C
   Z --> U
 ```
 
-The graph has no raw aura, combat-log, SpellActivationOverlay, action-button-glow, Cooldown Viewer, child-frame-scan, ticker, or simulated-stack path. Proc/use/expired/overcap/stacks are represented as unavailable, not inferred.
+`proc/use/expired/overcap/stacks` terminate at the explicit `unavailable` boundary. No inferred state path exists.

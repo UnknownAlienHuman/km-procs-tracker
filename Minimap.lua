@@ -1,4 +1,4 @@
--- KM Procs Tracker minimap launcher for Retail 12.1.
+-- KM Procs Tracker minimap launcher for Retail 12.1.5.
 
 local ADDON_NAME, Addon = ...
 Addon.Minimap = Addon.Minimap or {}
