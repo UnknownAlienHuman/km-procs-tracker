@@ -10,23 +10,15 @@
 local ADDON_NAME, Addon = ...
 _G[ADDON_NAME] = Addon
 
-Addon.VERSION = "0.5.0"
+Addon.VERSION = "0.5.1"
 Addon.DB_VERSION = 4
 Addon.DB_NAME = "KMProcsTrackerDB"
-Addon.KM_AURA_IDS = { 51124, 51128 }
 Addon.KM_SPELL_ID = 51124
 
-Addon.SPENDERS = {
-  [49020] = "Obliterate",
-  [207230] = "Frostscythe",
-}
-
-Addon.UNAVAILABLE_METRICS = {
-  "Killing Machine proc count",
-  "casts that actually consumed Killing Machine",
-  "expired Killing Machine applications",
-  "overcap/wasted Killing Machine applications",
-  "current Killing Machine stack count",
+-- Spell-to-counter mapping is independent of Killing Machine presence.
+local COUNTER_BY_SPELL = {
+  [49020] = "obliterateCasts",
+  [207230] = "frostscytheCasts",
 }
 
 local DEFAULT_DB = {
@@ -68,6 +60,19 @@ local VALID_POINTS = {
 }
 
 local MAX_EXACT_INTEGER = 9007199254740991
+local EventFrame
+local castsRegistered = false
+
+local function UpdateCastRegistration()
+  local enabled = Addon.db and Addon.db.enabled == true
+  if enabled == castsRegistered then return end
+  if enabled then
+    EventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+  else
+    EventFrame:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+  end
+  castsRegistered = enabled
+end
 
 local function SaturatingAdd(left, right)
   local total = left + right
@@ -87,9 +92,9 @@ local function CanAccess(value)
   end
   if type(issecretvalue) == "function" then
     local ok, secret = pcall(issecretvalue, value)
-    return ok and secret ~= true
+    return ok and secret == false
   end
-  return true
+  return false
 end
 
 local function SafeBoolean(value)
@@ -112,7 +117,7 @@ local function SafeTable(value)
   if not CanAccess(value) or type(value) ~= "table" then return nil end
   if type(issecrettable) == "function" then
     local ok, secret = pcall(issecrettable, value)
-    if not ok or secret == true then return nil end
+    if not ok or secret ~= false then return nil end
   end
   return value
 end
@@ -241,13 +246,26 @@ function Addon:Chatf(formatString, ...)
   self:Chat(ok and text or safeFormat)
 end
 
+function Addon:GetIcon()
+  if C_Spell and type(C_Spell.GetSpellTexture) == "function" then
+    local ok, value = pcall(C_Spell.GetSpellTexture, self.KM_SPELL_ID)
+    if ok and CanAccess(value) then
+      local valueType = type(value)
+      if valueType == "number" or valueType == "string" then return value end
+    end
+  end
+  return "Interface\\Icons\\INV_Misc_QuestionMark"
+end
+
 function Addon:InitDB()
-  local db = SafeTable(_G[self.DB_NAME]) or {}
-  db = MigrateLegacy(db)
+  local db = SafeTable(_G[self.DB_NAME])
+  -- A fresh install has no approximate counters to retire.
+  if db then db = MigrateLegacy(db) end
   db = MergeDefaults(db, DEFAULT_DB)
   SanitizeDB(db)
   _G[self.DB_NAME] = db
   self.db = db
+  UpdateCastRegistration()
 end
 
 function Addon:IsEnabled()
@@ -256,7 +274,10 @@ end
 
 function Addon:SetEnabled(enabled)
   if not self.db then return end
-  self.db.enabled = enabled == true
+  enabled = enabled == true
+  if self.db.enabled == enabled then return end
+  self.db.enabled = enabled
+  UpdateCastRegistration()
   if self.UI and self.UI.SetAuraEnabled then
     self.UI:SetAuraEnabled(self.db.enabled)
   end
@@ -283,15 +304,11 @@ end
 function Addon:RecordSuccessfulCast(spellID)
   spellID = SafeNumber(spellID)
   if not spellID or not self:IsEnabled() then return false end
-  local normalizedSpellID = math.floor(spellID)
-  if normalizedSpellID ~= spellID or not self.SPENDERS[normalizedSpellID] then return false end
+  local counter = COUNTER_BY_SPELL[spellID]
+  if not counter then return false end
 
   local exact = self.db.exact
-  if normalizedSpellID == 49020 then
-    exact.obliterateCasts = IncrementCounter(exact.obliterateCasts)
-  elseif normalizedSpellID == 207230 then
-    exact.frostscytheCasts = IncrementCounter(exact.frostscytheCasts)
-  end
+  exact[counter] = IncrementCounter(exact[counter])
   exact.spenderCasts = SaturatingAdd(exact.obliterateCasts, exact.frostscytheCasts)
 
   if self.UI and self.UI.UpdateCounters then self.UI:UpdateCounters() end
@@ -367,24 +384,20 @@ Addon.Access = {
   SafePoint = SafePoint,
 }
 
-local EventFrame = CreateFrame("Frame")
+EventFrame = CreateFrame("Frame")
 EventFrame:RegisterEvent("ADDON_LOADED")
 EventFrame:RegisterEvent("PLAYER_LOGIN")
 EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-if type(EventFrame.RegisterUnitEvent) == "function" then
-  EventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
-else
-  EventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-end
-
 EventFrame:SetScript("OnEvent", function(_, event, ...)
   if event == "ADDON_LOADED" then
     local loadedAddon = ...
     if SafeString(loadedAddon) ~= ADDON_NAME then return end
     Addon:InitDB()
+    EventFrame:UnregisterEvent("ADDON_LOADED")
     SLASH_KMPROCSTRACKER1 = "/kmpt"
     SlashCmdList.KMPROCSTRACKER = function(message) Addon:SlashCommand(message) end
   elseif event == "PLAYER_LOGIN" then
+    EventFrame:UnregisterEvent("PLAYER_LOGIN")
     if not Addon.db then Addon:InitDB() end
     if Addon.UI and Addon.UI.OnLogin then Addon.UI:OnLogin() end
     if Addon.Minimap and Addon.Minimap.OnLogin then Addon.Minimap:OnLogin() end

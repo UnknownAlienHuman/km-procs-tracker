@@ -14,8 +14,8 @@
 
 - Retail / Midnight `12.1.5`
 - Interface `120105`
-- addon version `0.5.0`
-- verified client/source baseline `12.1.5.70783`
+- addon version `0.5.1`
+- inspected source baseline `12.1.5.70783`; client validation **NOT-RUN**
 - source snapshot `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
 - required Blizzard dependency `Blizzard_AuraContainer`
 - no GitHub Actions workflow
@@ -32,7 +32,7 @@ Never replace `unavailable` with zero, a best guess, or a hidden inferred counte
 
 ## Ownership
 
-`Core.lua` is the only SavedVariables, event, command, and exact-counter owner.
+`Core.lua` is the only SavedVariables, event, command, exact-counter, and shared icon-lookup owner. It unregisters bootstrap events after use and cast events while disabled.
 
 `UI.lua` is the only tracker-frame and managed AuraContainer owner.
 
@@ -63,7 +63,7 @@ Presentation signals are not exact proc evidence. Managed aura state remains opa
 
 ## Access boundary
 
-The access decision must precede type checks, comparisons, conversion, formatting, indexing, or persistence of game-returned values. `pcall` contains errors; it does not authorize secret-value access.
+The access decision must precede type checks, comparisons, conversion, formatting, indexing, or persistence of game-returned values. Unknown or failing access predicates reject the value. `pcall` contains errors; it does not authorize secret-value access.
 
 `UNIT_SPELLCAST_SUCCEEDED` counts only when:
 
@@ -88,7 +88,7 @@ migration.retiredApproximateCounters
 
 `exact.spenderCasts` is derived from the two spell counters during sanitization and updates. Do not trust or mutate it independently.
 
-Legacy approximate counters and backend state are intentionally discarded. Preserve only bounded frame/minimap preferences and `enabled`.
+Legacy approximate counters and backend state are intentionally discarded. Preserve only bounded frame/minimap preferences and `enabled`. A fresh install must not claim a legacy migration.
 
 ## Managed AuraContainer
 
@@ -98,8 +98,10 @@ Legacy approximate counters and backend state are intentionally discarded. Prese
 unit = player
 slot = killing_machine
 filter = HELPFUL
-candidateFilters.includeSpellIDs = { [51124]=true, [51128]=true }
+candidateFilters.includeSpellIDs = { [51124]=true }
 ```
+
+`51128` is the passive talent, not an alternate proc aura.
 
 The initialization callback configures only native sinks:
 
@@ -116,9 +118,11 @@ Do not manually refresh the container. `SetUnit`, `AddAuraSlot`, `SetEnabled`, a
 
 ## Combat and UI
 
-AuraContainer creation, managed enable-state changes, and tracker layout changes defer during `InCombatLockdown()` and flush on `PLAYER_REGEN_ENABLED`.
+Tracker/managed creation, managed enable-state changes, tracker layout, and drag completion defer during `InCombatLockdown()` and flush on `PLAYER_REGEN_ENABLED`.
 
-The addon frame may update exact cast text during combat because it does not inspect or mutate protected aura state.
+Scale the ordinary root, not adopted children. Persist offsets independently of scale. Finish a deferred drag using the applied scale before applying a pending scale setting.
+
+Exact cast text lives on an independent addon-owned layer above the managed display. It can update during combat without touching protected aura state. Keep its hot update allocation-free apart from the displayed string and skip unchanged text.
 
 ## Commands
 
@@ -143,7 +147,7 @@ texlua --luaconly tests/test_evidence_model_12_1_5.lua
 texlua tests/test_evidence_model_12_1_5.lua
 ```
 
-Expected result:
+Successful output begins:
 
 ```text
 PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender casts become exact counters
@@ -151,4 +155,4 @@ PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender
 
 Static review must find no raw aura, combat-log, overlay, Cooldown Viewer, child-frame scan, polling, or manual `UpdateAllAuras` path.
 
-Live-client gates remain mandatory for the named build: managed KM visuals, both candidate spell IDs, enable/disable, combat deferral, reload/migration, drag/scale/minimap, taint, Lua errors, and CPU/allocation behavior.
+Live-client gates remain mandatory for the named build: managed KM visuals and spell-ID matching, enable/disable, combat deferral, reload/migration, drag/scale/minimap, bundled libraries, taint, Lua errors, and CPU/allocation behavior. Source-build metadata is not a runtime PASS.

@@ -9,7 +9,6 @@ local UI = Addon.UI
 local Access = Addon.Access
 
 local BASE_SIZE = 44
-local QUESTION_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 local SLOT_KEY = "killing_machine"
 local AURA_INIT_UNINITIALIZED = "uninitialized"
 local AURA_INIT_PENDING = "pending"
@@ -32,19 +31,6 @@ end
 local function Round(value)
   if value >= 0 then return math.floor(value + 0.5) end
   return math.ceil(value - 0.5)
-end
-
-local function GetKMTexture()
-  if C_Spell and type(C_Spell.GetSpellTexture) == "function" then
-    for _, spellID in ipairs(Addon.KM_AURA_IDS) do
-      local ok, value = pcall(C_Spell.GetSpellTexture, spellID)
-      if ok and Access.CanAccess(value) then
-        local valueType = type(value)
-        if valueType == "number" or valueType == "string" then return value end
-      end
-    end
-  end
-  return QUESTION_ICON
 end
 
 local function InitializeManagedButton(button, container)
@@ -102,15 +88,13 @@ function UI:CreateManagedAura()
     return false
   end
 
-  local includeSpellIDs = {}
-  for _, spellID in ipairs(Addon.KM_AURA_IDS) do includeSpellIDs[spellID] = true end
-
   local options = {
     initializeFrame = function(button)
       InitializeManagedButton(button, container)
     end,
     candidateFilters = {
-      includeSpellIDs = includeSpellIDs,
+      -- 51128 is the passive talent, not the timed proc aura.
+      includeSpellIDs = { [Addon.KM_SPELL_ID] = true },
     },
     sortMethod = AuraContainerSortMethod and AuraContainerSortMethod.Default or nil,
     sortDirection = AuraContainerSortDirection and AuraContainerSortDirection.Normal or nil,
@@ -158,12 +142,18 @@ function UI:CreateFrame()
   local placeholder = frame:CreateTexture(nil, "BACKGROUND")
   self.placeholder = placeholder
   placeholder:SetAllPoints(frame)
-  placeholder:SetTexture(GetKMTexture())
+  placeholder:SetTexture(Addon:GetIcon())
   placeholder:SetTexCoord(0.08, 0.92, 0.08, 0.92)
   placeholder:SetAlpha(0.20)
   placeholder:SetDesaturated(true)
 
-  local exactText = frame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+  -- An ordinary sibling of the managed container keeps cast text above its
+  -- icon/cooldown without retaining or mutating any adopted aura child.
+  local counterFrame = CreateFrame("Frame", nil, frame)
+  counterFrame:SetAllPoints(frame)
+  counterFrame:SetFrameLevel(frame:GetFrameLevel() + 5)
+  counterFrame:EnableMouse(false)
+  local exactText = counterFrame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
   self.exactText = exactText
   exactText:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
   exactText:SetText("0")
@@ -174,21 +164,28 @@ function UI:CreateFrame()
     local db = GetDB()
     if not db or db.frame.locked or InCombatLockdown() then return end
     self:StartMoving()
+    UI.isDragging = true
   end)
-  frame:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    UI:SavePosition()
-  end)
+  frame:SetScript("OnDragStop", function() UI:StopMoving() end)
   frame:SetScript("OnClick", function(_, button)
     if button == "RightButton" then UI:ShowContextMenu() end
   end)
 end
 
 function UI:OnLogin()
-  self:CreateFrame()
-  if Addon:IsEnabled() then self:CreateManagedAura() end
   self:ApplyDB()
-  self:UpdateCounters()
+end
+
+function UI:StopMoving()
+  if not self.isDragging then return end
+  if InCombatLockdown() then
+    self.pendingDragStop = true
+    return
+  end
+  self.frame:StopMovingOrSizing()
+  self.isDragging = false
+  self.pendingDragStop = false
+  self:SavePosition()
 end
 
 function UI:SavePosition()
@@ -203,31 +200,38 @@ function UI:SavePosition()
   local db = GetDB()
   db.frame.point = point
   db.frame.relativePoint = relativePoint
-  db.frame.x = Round(x)
-  db.frame.y = Round(y)
+  -- Persist offsets in UIParent units, independent of the current icon scale.
+  -- Use the applied scale: a combat-deferred setting may already have changed.
+  local scale = self.appliedScale or 1
+  db.frame.x = Round(x * scale)
+  db.frame.y = Round(y * scale)
 end
 
 function UI:ApplyDB()
-  if not self.frame then return end
   if InCombatLockdown() then
     self.pendingApply = true
     return
   end
 
+  self:CreateFrame()
+  self:StopMoving()
   local db = GetDB()
   self.pendingApply = false
+  self.appliedScale = db.frame.scale
+  self.frame:SetScale(self.appliedScale)
   self.frame:ClearAllPoints()
-  self.frame:SetPoint(db.frame.point, UIParent, db.frame.relativePoint, db.frame.x, db.frame.y)
-  self.frame:SetScale(1)
-  local size = Round(BASE_SIZE * db.frame.scale)
-  self.frame:SetSize(size, size)
+  self.frame:SetPoint(db.frame.point, UIParent, db.frame.relativePoint,
+    db.frame.x / self.appliedScale, db.frame.y / self.appliedScale)
+  self.frame:SetSize(BASE_SIZE, BASE_SIZE)
   self.frame:EnableMouse(true)
   self.frame:SetShown(db.frame.shown)
   self:SetAuraEnabled(db.enabled)
+  self:UpdateCounters()
 end
 
 function UI:FlushPending()
   if InCombatLockdown() then return end
+  if self.pendingDragStop then self:StopMoving() end
 
   if self.pendingInit then
     if Addon:IsEnabled() then
@@ -287,8 +291,10 @@ end
 
 function UI:UpdateCounters()
   if not self.exactText then return end
-  local snapshot = Addon:GetEvidenceSnapshot()
-  self.exactText:SetText(tostring(snapshot.spenderCasts))
+  local total = GetDB().exact.spenderCasts
+  if self.displayedCastCount == total then return end
+  self.displayedCastCount = total
+  self.exactText:SetText(tostring(total))
 end
 
 function UI:SetShown(shown)
@@ -299,6 +305,7 @@ function UI:SetShown(shown)
     self.pendingApply = true
     return
   end
+  if not db.frame.shown then self:StopMoving() end
   self.frame:SetShown(db.frame.shown)
 end
 
