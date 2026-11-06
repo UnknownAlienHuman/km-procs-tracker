@@ -46,7 +46,7 @@ Schema v4 stores bounded UI preferences, minimap state, enabled state, exact Obl
 
 Sanitization repairs invalid frame anchors, rejects inaccessible/non-finite values, clamps coordinates/scale/minimap angle, and recomputes the aggregate exact counter.
 
-Legacy heuristic counters and backend state are discarded rather than relabelled as exact data. A fresh install does not set the legacy-retirement marker.
+Legacy heuristic counters and backend state are discarded rather than relabelled as exact data. A fresh install does not set the legacy-retirement marker. A schema newer than v4 is preserved without modification. Runtime-only `dbReadOnly` selects isolated session defaults for every consumer; a chat notice explains that changes will not be saved.
 
 ## Managed lifecycle
 
@@ -58,6 +58,8 @@ uninitialized
 ```
 
 A failed `AddAuraSlot` attempt retains its container reference and state so repeated enable/layout calls cannot leak frames. Disabling a pending display cancels its deferred creation.
+
+The selected [frame provider](https://github.com/Gethe/wow-ui-source/blob/297d7aaaa736f346b3e036f38ee088eaf7f8c07f/Interface/AddOns/Blizzard_AuraContainer/Blizzard_AuraContainerFrameProviders.lua) invokes `initializeFrame` via `securecallfunction`. The addon catches errors inside its own initializer and requires an explicit success flag before entering `ready`; a non-nil slot return alone is not proof of completed setup.
 
 The addon never calls `AuraContainer:UpdateAllAuras`; Blizzard event handling owns refresh.
 
@@ -73,7 +75,7 @@ The ordinary root scales its entire hierarchy. Stored offsets are in UIParent un
 - bootstrap event registrations removed after use;
 - one managed aura slot;
 - no per-cast snapshot allocation or unchanged counter-text writes;
-- no `OnUpdate` or ticker;
+- no tracker `OnUpdate` or ticker; vendored LibDBIcon owns a transient minimap drag update, removed on drag stop;
 - no raw aura or combat-log event;
 - no frame-tree/action-bar scan;
 - no manual refresh loop.
@@ -82,4 +84,6 @@ The ordinary root scales its entire hierarchy. Stored offsets are in UIParent un
 
 The deterministic harness loads all three runtime modules. It checks migration, access rejection, event ownership, exact counting, combat/drag deferral, scale-independent settings, native managed sinks, enable/disable behavior, aggregate reconciliation, fail-closed initialization, and the LDB/DBIcon consumer contract. Managed child methods deliberately fail after adoption in the harness.
 
-This is not a WoW VM, renderer, or bundled-library integration test. Live visuals, spell-ID matching, taint, library behavior, and profiler results require the named Retail build.
+`tests/test_bundled_libraries.lua` additionally runs the actual vendored libraries in both login orders against mocked frames, including proxy callbacks, launcher controls, drag cleanup and repeated embedding.
+
+Neither harness is the WoW VM or renderer. Live visuals, spell-ID matching, taint, library behavior, and profiler results require the named Retail build.

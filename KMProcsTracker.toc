@@ -2,7 +2,7 @@
 ## Title: KM Procs Tracker
 ## Notes: Blizzard-managed Killing Machine display with exact spender-cast evidence for Retail 12.1.5.
 ## Author: Neomorph
-## Version: 0.5.1
+## Version: 0.5.2
 ## SavedVariables: KMProcsTrackerDB
 ## Dependencies: Blizzard_AuraContainer
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0

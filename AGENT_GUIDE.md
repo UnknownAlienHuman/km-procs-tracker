@@ -8,13 +8,14 @@
 4. `Minimap.lua`
 5. `ARCHITECTURE.md`
 6. `tests/test_evidence_model_12_1_5.lua`
-7. `UnknownAlienHuman/wow-addon-engineering-kb`
+7. `tests/test_bundled_libraries.lua`
+8. `UnknownAlienHuman/wow-addon-engineering-kb`
 
 ## Target contract
 
 - Retail / Midnight `12.1.5`
 - Interface `120105`
-- addon version `0.5.1`
+- addon version `0.5.2`
 - inspected source baseline `12.1.5.70783`; client validation **NOT-RUN**
 - source snapshot `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
 - required Blizzard dependency `Blizzard_AuraContainer`
@@ -88,7 +89,7 @@ migration.retiredApproximateCounters
 
 `exact.spenderCasts` is derived from the two spell counters during sanitization and updates. Do not trust or mutate it independently.
 
-Legacy approximate counters and backend state are intentionally discarded. Preserve only bounded frame/minimap preferences and `enabled`. A fresh install must not claim a legacy migration.
+Legacy approximate counters and backend state are intentionally discarded. Preserve only bounded frame/minimap preferences and `enabled`. A fresh install must not claim a legacy migration. A future schema must remain untouched: use isolated session defaults, set the runtime-only `dbReadOnly` flag, and notify the user. Never pass the future saved table to UI or library writers.
 
 ## Managed AuraContainer
 
@@ -113,6 +114,8 @@ The initialization callback configures only native sinks:
 Do not retain or inspect the managed AuraButton after initialization.
 
 Initialization is a one-shot state machine: `uninitialized -> pending|ready|failed`. A contract failure is retained as `failed` until `/reload`; repeated UI application must not allocate more containers.
+
+Require an explicit successful `initializeFrame` result: Blizzard contains callback errors via `securecallfunction`, so an `AddAuraSlot` return alone is insufficient. The result records construction, never aura state.
 
 Do not manually refresh the container. `SetUnit`, `AddAuraSlot`, `SetEnabled`, and Blizzard events own its lifecycle.
 
@@ -140,11 +143,10 @@ Exact cast text lives on an independent addon-owned layer above the managed disp
 ## Verification
 
 ```text
-texlua --luaconly Core.lua
-texlua --luaconly UI.lua
-texlua --luaconly Minimap.lua
-texlua --luaconly tests/test_evidence_model_12_1_5.lua
+texluac -p Core.lua UI.lua Minimap.lua tests/test_evidence_model_12_1_5.lua tests/test_bundled_libraries.lua
 texlua tests/test_evidence_model_12_1_5.lua
+texlua tests/test_bundled_libraries.lua
+texlua tests/test_bundled_libraries.lua library-first
 ```
 
 Successful output begins:
@@ -153,6 +155,8 @@ Successful output begins:
 PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender casts become exact counters
 ```
 
-Static review must find no raw aura, combat-log, overlay, Cooldown Viewer, child-frame scan, polling, or manual `UpdateAllAuras` path.
+Static review of tracker code must find no raw aura, combat-log, overlay, Cooldown Viewer, child-frame scan, polling, or manual `UpdateAllAuras` path.
+
+The bundled-library test permits the library-owned minimap drag `OnUpdate` only between drag start and stop; it must not become a tracker-state backend.
 
 Live-client gates remain mandatory for the named build: managed KM visuals and spell-ID matching, enable/disable, combat deferral, reload/migration, drag/scale/minimap, bundled libraries, taint, Lua errors, and CPU/allocation behavior. Source-build metadata is not a runtime PASS.

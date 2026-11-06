@@ -10,7 +10,7 @@
 local ADDON_NAME, Addon = ...
 _G[ADDON_NAME] = Addon
 
-Addon.VERSION = "0.5.1"
+Addon.VERSION = "0.5.2"
 Addon.DB_VERSION = 4
 Addon.DB_NAME = "KMProcsTrackerDB"
 Addon.KM_SPELL_ID = 51124
@@ -259,13 +259,23 @@ end
 
 function Addon:InitDB()
   local db = SafeTable(_G[self.DB_NAME])
-  -- A fresh install has no approximate counters to retire.
-  if db then db = MigrateLegacy(db) end
+  local version = db and SafeNumber(db.version)
+  self.dbReadOnly = version ~= nil and version > self.DB_VERSION
+  -- A downgrade must not rewrite a schema this version does not understand.
+  -- All consumers receive session-only defaults; the saved root stays untouched.
+  if self.dbReadOnly then
+    db = nil
+  elseif db then
+    db = MigrateLegacy(db)
+  end
   db = MergeDefaults(db, DEFAULT_DB)
   SanitizeDB(db)
-  _G[self.DB_NAME] = db
+  if not self.dbReadOnly then _G[self.DB_NAME] = db end
   self.db = db
   UpdateCastRegistration()
+  if self.dbReadOnly then
+    self:Chat("KMPT: saved data belongs to a newer version; using temporary settings and counters without overwriting it.")
+  end
 end
 
 function Addon:IsEnabled()

@@ -88,9 +88,12 @@ function UI:CreateManagedAura()
     return false
   end
 
+  -- Blizzard invokes this callback through securecallfunction. Its errors do
+  -- not reliably escape AddAuraSlot, so track our own setup result explicitly.
+  local initialized = false
   local options = {
     initializeFrame = function(button)
-      InitializeManagedButton(button, container)
+      initialized = pcall(InitializeManagedButton, button, container)
     end,
     candidateFilters = {
       -- 51128 is the passive talent, not the timed proc aura.
@@ -101,7 +104,7 @@ function UI:CreateManagedAura()
   }
 
   local added, auraFrame = pcall(container.AddAuraSlot, container, SLOT_KEY, "HELPFUL", options)
-  if not added or not auraFrame then
+  if not added or not auraFrame or not initialized then
     FailManagedAura(self, container)
     return false
   end
@@ -122,6 +125,10 @@ end
 
 function UI:CreateFrame()
   if self.frame then return end
+  if InCombatLockdown() then
+    self.pendingApply = true
+    return
+  end
 
   local frame = CreateFrame("Button", ADDON_NAME .. "_IconFrame", UIParent, "BackdropTemplate")
   self.frame = frame

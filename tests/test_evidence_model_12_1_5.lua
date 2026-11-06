@@ -11,6 +11,7 @@ local nilCreate = false
 local failSetUnit = false
 local failSetEnabled = false
 local failInitialize = false
+local skipInitialize = false
 local assertions = 0
 
 local SECRET = setmetatable({}, {
@@ -131,7 +132,9 @@ local function newAuraContainer(parent)
       self.count, self.countSettings = count, settings
     end
     function button:SetDurationCooldown(cooldown) self.cooldown = cooldown end
-    options.initializeFrame(button)
+    -- Selected Blizzard provider uses securecallfunction: callback errors are
+    -- contained, and AddAuraSlot can still return a partially configured button.
+    if not skipInitialize then pcall(options.initializeFrame, button) end
     restrictManagedObject(button)
     self.button = button
     return button
@@ -553,6 +556,7 @@ expectFailedInit("CreateFrame exception", function(value) failCreate = value end
 expectFailedInit("CreateFrame nil", function(value) nilCreate = value end)
 expectFailedInit("SetUnit exception", function(value) failSetUnit = value end)
 expectFailedInit("initializeFrame exception", function(value) failInitialize = value end)
+expectFailedInit("initializeFrame not invoked", function(value) skipInitialize = value end)
 expectFailedInit("SetEnabled exception", function(value) failSetEnabled = value end)
 
 -- Cancel a deferred initialization without allocating a native container.
@@ -579,5 +583,59 @@ Addon:SetEnabled(true)
 assertEq(#auraContainers, beforeCancel + 1, "runtime failure leaked another container")
 assertEq(Addon:RecordSuccessfulCast(49020), true, "display failure broke exact counters")
 
+-- Constructor entry points must enforce their own combat boundary.
+local fresh = { Access = Addon.Access, GetIcon = function() return 135305 end }
+assert(loadfile("UI.lua"))("KMPTConstructorProbe", fresh)
+combat = true
+fresh.UI:CreateFrame()
+assertEq(fresh.UI.frame, nil, "constructor bypassed combat boundary")
+assertEq(fresh.UI.pendingApply, true, "constructor did not queue creation")
+combat = false
+
+-- Downgrading must preserve future-schema data by identity and by content.
+-- Settings, counters and the minimap library may mutate only a separate session DB.
+local savedFuture = {
+  version = 99, enabled = false, frame = { scale = 1.7 }, minimap = { hide = true },
+  exact = { obliterateCasts = 123, frostscytheCasts = 45, spenderCasts = 168 },
+  future = { keep = true },
+}
+KMProcsTrackerDB = savedFuture
+Addon:InitDB()
+assertEq(Addon.dbReadOnly, true, "future schema not marked read-only")
+assert(DEFAULT_CHAT_FRAME.lines[#DEFAULT_CHAT_FRAME.lines]:find("newer version", 1, true),
+  "downgrade was not explained to the user")
+assertEq(KMProcsTrackerDB, savedFuture, "future saved root replaced")
+assert(Addon:GetDB() ~= savedFuture, "session DB aliases future saved data")
+assert(Addon:GetDB().exact ~= savedFuture.exact, "session counters alias saved data")
+assert(Addon:GetDB().frame ~= savedFuture.frame, "session frame aliases saved data")
+assertEq(Addon:GetDB().migration.retiredApproximateCounters, false, "future data treated as legacy")
+Addon:ResetCounters()
+Addon:RecordSuccessfulCast(49020)
+Addon:SlashCommand("scale 2")
+Addon:SetMinimapHidden(false)
+Addon:GetDB().minimap.minimapPos = 77
+assertEq(dbIcon.settings, Addon:GetDB().minimap, "minimap did not receive session settings")
+assertEq(savedFuture.version, 99, "future schema was rewritten")
+assertEq(savedFuture.enabled, false, "future enabled preference was rewritten")
+assertEq(savedFuture.frame.scale, 1.7, "future scale was rewritten")
+assertEq(savedFuture.minimap.hide, true, "future minimap preference was rewritten")
+assertEq(savedFuture.minimap.minimapPos, nil, "future minimap position was overwritten")
+assertEq(savedFuture.exact.obliterateCasts, 123, "future Obliterate total was destroyed")
+assertEq(savedFuture.exact.frostscytheCasts, 45, "future Frostscythe total was destroyed")
+assertEq(savedFuture.exact.spenderCasts, 168, "future aggregate was rewritten")
+assertEq(savedFuture.future.keep, true, "unknown future field was destroyed")
+
+-- Returning to a supported schema restores persistent writes, not session mode.
+KMProcsTrackerDB = { version = 4, exact = { obliterateCasts = 8, frostscytheCasts = 2 } }
+Addon:InitDB()
+assertEq(Addon.dbReadOnly, false, "read-only state leaked into supported schema")
+assertEq(KMProcsTrackerDB, Addon:GetDB(), "supported schema detached from persistence")
+assertEq(Addon:GetEvidenceSnapshot().spenderCasts, 10, "supported counts lost after recovery")
+Addon:RecordSuccessfulCast(49020)
+assertEq(KMProcsTrackerDB.exact.obliterateCasts, 9, "persistent counts did not resume")
+
 print("PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender casts become exact counters")
 print("PASS: " .. assertions .. " deterministic checks (mocked WoW API)")
+
+-- Shared only with the bundled-library integration test, never loaded by the TOC.
+return { newRegion = newRegion, Addon = Addon, assertEq = assertEq }

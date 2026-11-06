@@ -12,7 +12,7 @@ The addon combines:
 
 - Retail / Midnight `12.1.5`
 - Interface `120105`
-- addon version `0.5.1`
+- addon version `0.5.2`
 - inspected source baseline `12.1.5.70783`; live-client validation **NOT-RUN**
 - source snapshot `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
 - required Blizzard addon `Blizzard_AuraContainer`
@@ -62,21 +62,21 @@ Right-click the tracker for enable/disable, reset, lock, scale, and hide control
 
 - inaccessible event values and unknown access decisions are rejected before comparison or conversion;
 - invalid SavedVariables anchors and numeric values are repaired or clamped;
+- future-schema saves stay untouched on downgrade; a chat notice explains that settings and counters are session-only;
 - exact aggregate counts are recomputed from per-spell counters;
 - tracker creation, managed enable-state changes, and drag completion defer during combat;
-- managed initialization fails closed without repeated frame allocation;
+- managed initialization requires confirmed callback completion and fails closed without repeated frame allocation;
 - disabled addons unsubscribe from cast events; bootstrap events unregister after initialization;
 - exact cast text uses an independent addon-owned layer, skips unchanged writes, and does not allocate a snapshot per cast;
-- no raw aura API, combat log, overlay, action-bar, Cooldown Viewer, frame-tree scan, ticker, `OnUpdate`, or manual managed refresh path.
+- tracker code has no raw aura API, combat log, overlay, action-bar, Cooldown Viewer, frame-tree scan, ticker, `OnUpdate`, or manual managed refresh path. Vendored LibDBIcon uses `OnUpdate` only for minimap dragging and removes it on drag stop.
 
 ## Validation
 
 ```text
-texlua --luaconly Core.lua
-texlua --luaconly UI.lua
-texlua --luaconly Minimap.lua
-texlua --luaconly tests/test_evidence_model_12_1_5.lua
+texluac -p Core.lua UI.lua Minimap.lua tests/test_evidence_model_12_1_5.lua tests/test_bundled_libraries.lua
 texlua tests/test_evidence_model_12_1_5.lua
+texlua tests/test_bundled_libraries.lua
+texlua tests/test_bundled_libraries.lua library-first
 ```
 
 The regression loads all three runtime modules against a mocked WoW API. It checks migration, exact counts, access rejection, post-adoption object isolation, scale/drag deferral, coalesced changes, initialization failures, and the LDB/DBIcon consumer contract. Successful output begins:
@@ -84,6 +84,8 @@ The regression loads all three runtime modules against a mocked WoW API. It chec
 ```text
 PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender casts become exact counters
 ```
+
+The bundled-library test runs the actual vendored LibStub, CallbackHandler, LDB and LibDBIcon with mocked frames. It covers both login orders, proxy callbacks, show/hide, clicks, tooltips, drag cleanup and repeated embedding. The main regression also checks callback-error containment and future-schema preservation.
 
 The offline regression does not replace live Retail validation of visuals, spell-ID matching, combat behavior, bundled-library behavior, taint, errors, and profiler results. No runtime performance or compatibility pass is claimed by the source-build metadata.
 

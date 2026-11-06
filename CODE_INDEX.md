@@ -7,6 +7,7 @@
 | `UI.lua` | Tracker frame, neutral placeholder, one managed KM AuraContainer slot, fail-closed init state, combat deferral |
 | `Minimap.lua` | LDB/LibDBIcon launcher and exact/unavailable evidence wording |
 | `tests/test_evidence_model_12_1_5.lua` | Deterministic regression for migration, managed sinks, access rejection, exact casts, enable/disable, and failure containment |
+| `tests/test_bundled_libraries.lua` | Real vendored-library integration with mocked frames: both login orders, callbacks, controls, drag cleanup, re-embedding |
 | `libs/` | Vendored LibStub, CallbackHandler, LibDataBroker, and LibDBIcon |
 
 The runtime intentionally has no raw aura, combat-log, overlay, action-button-glow, Cooldown Viewer, child-frame scan, polling, simulated-stack, or manual AuraContainer refresh backend.
