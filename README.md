@@ -1,93 +1,92 @@
 # KM Procs Tracker
 
-Evidence-safe Killing Machine display for Frost Death Knights on World of Warcraft Retail 12.1.5.
+Adaptive Killing Machine tracker for Frost Death Knights on World of Warcraft Retail 12.1.5.
 
-The addon combines:
+## What it does
 
-- a Blizzard-managed Killing Machine aura display;
-- exact successful player casts of Obliterate and Frostscythe;
-- explicit `unavailable` labels for metrics the addon cannot prove.
+The addon always renders Killing Machine through one Blizzard-managed `CustomAuraContainer` slot for aura `51124`.
+
+It then selects one observation mode at runtime:
+
+- **readable public-aura observation** — when `C_Secrets.ShouldSpellAuraBeSecret(51124)` is accessible and false, the addon re-queries only `C_UnitAuras.GetPlayerAuraBySpellID(51124)` on player `UNIT_AURA` wake-ups;
+- **managed display only** — when the aura is secret, inaccessible, or the required public API is unavailable. No heuristic fallback is used.
+
+The mode and public maximum are refreshed automatically across world, combat, talent, and specialization transitions. Moving from a restricted interval back to readable data creates a fresh baseline, so an existing aura is not fabricated as a new proc.
+
+## Counters
+
+When exact observation is active:
+
+- **Observed KM applications** = readable stack gains + readable expiration refreshes while already at the public maximum stack count;
+- **Stack gains** = positive changes in the readable application count;
+- **Refreshes while capped** = same-stack updates at cap with a later absolute expiration time;
+- **Stack losses** = negative changes in readable applications, without claiming why they disappeared.
+
+`Observed KM applications` is deliberately a lower bound. If multiple cap refreshes are coalesced into one `UNIT_AURA` wake-up, the addon records one observed refresh. Restricted intervals are not reconstructed later.
+
+The addon also keeps exact successful player-cast counters for:
+
+- Obliterate (`49020`);
+- Frostscythe (`207230`).
+
+A cast is not automatically labelled as Killing Machine consumption. Loss cause (`consumed`, `expired`, `dispelled`) remains unavailable because the public aura state alone does not prove causality or event ordering.
 
 ## Compatibility
 
 - Retail / Midnight `12.1.5`
 - Interface `120105`
-- addon version `0.5.2`
-- inspected source baseline `12.1.5.70783`; live-client validation **NOT-RUN**
+- addon version `0.6.0`
+- inspected Blizzard source baseline `12.1.5.70783`
 - source snapshot `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
 - required Blizzard addon `Blizzard_AuraContainer`
-- SavedVariables `KMProcsTrackerDB`
+- SavedVariables `KMProcsTrackerDB`, schema 5
 
-## Exact data
-
-The addon counts accessible successful `player` casts of:
-
-- Obliterate (`49020`)
-- Frostscythe (`207230`)
-
-These counters do **not** claim that Killing Machine was active or consumed.
-
-## Managed aura display
-
-One `CustomAuraContainerTemplate` slot filters player `HELPFUL` auras to the Killing Machine proc aura `51124`. Passive talent `51128` is not an alternate proc aura. Blizzard owns visibility, stack count, duration, refresh, and restricted state. The addon only supplies native icon, application-count, and duration-cooldown display sinks.
-
-The managed button is never queried after initialization, and the addon does not manually call `UpdateAllAuras`.
-
-## Intentionally unavailable
-
-The addon does not fabricate numeric values for:
-
-- Killing Machine proc count;
-- KM-attributed consumption;
-- expiration count;
-- overcap/waste count;
-- current stack count.
-
-The removed 0.3.x model inferred these from aura scans, overlays, action-button glows, Cooldown Viewer frames, combat-log ordering, and timing windows. Those signals could freeze, double-count, or expose restricted state, so legacy approximate counters are not migrated into exact data.
+The source baseline is not a live-client PASS. `/kmpt status` prints the actual client build, Interface, current observation mode, reason, and counters.
 
 ## Controls
 
-- `/kmpt` — show/hide the frame
-- `/kmpt show|hide`
-- `/kmpt toggle` — enable/disable display and counting
-- `/kmpt reset` — reset exact cast counters
-- `/kmpt lock|unlock`
-- `/kmpt scale 0.60..3.00`
-- `/kmpt minimap show|hide`
-- `/kmpt status`
+- `/kmpt` — show/hide;
+- `/kmpt show|hide`;
+- `/kmpt toggle` — enable/disable display and event ownership;
+- `/kmpt reset` — reset observed applications, losses, and cast counters, then re-baseline the current aura;
+- `/kmpt lock|unlock`;
+- `/kmpt scale 0.60..3.00`;
+- `/kmpt minimap show|hide`;
+- `/kmpt status`.
 
-Right-click the tracker for enable/disable, reset, lock, scale, and hide controls. Left-click the minimap icon toggles the frame; right-click resets exact counters. Scaling applies to the icon, glow, cooldown, and text together; saved offsets remain independent of scale.
+Right-click the tracker for controls. Left-click the minimap icon toggles the tracker; right-click resets all counters.
 
 ## Safety and performance
 
-- inaccessible event values and unknown access decisions are rejected before comparison or conversion;
-- invalid SavedVariables anchors and numeric values are repaired or clamped;
-- future-schema saves stay untouched on downgrade; a chat notice explains that settings and counters are session-only;
-- exact aggregate counts are recomputed from per-spell counters;
-- tracker creation, managed enable-state changes, and drag completion defer during combat;
-- managed initialization requires confirmed callback completion and fails closed without repeated frame allocation;
-- disabled addons unsubscribe from cast events; bootstrap events unregister after initialization;
-- exact cast text uses an independent addon-owned layer, skips unchanged writes, and does not allocate a snapshot per cast;
-- tracker code has no raw aura API, combat log, overlay, action-bar, Cooldown Viewer, frame-tree scan, ticker, `OnUpdate`, or manual managed refresh path. Vendored LibDBIcon uses `OnUpdate` only for minimap dragging and removes it on drag stop.
+- the secrecy predicate is evaluated before the raw aura getter;
+- the getter is never called while the predicate says the aura is secret;
+- the `UNIT_AURA` payload is ignored and used only as a wake-up;
+- every consumed scalar/table/field is access-gated before comparison or arithmetic;
+- a restriction/error clears the baseline and pauses observation instead of guessing;
+- managed display creation and layout changes defer during combat;
+- no combat log, action-button glow, overlay, Cooldown Viewer, child-frame scan, ticker, or tracker `OnUpdate`;
+- disabled mode unregisters both `UNIT_AURA` and `UNIT_SPELLCAST_SUCCEEDED`;
+- future-schema SavedVariables remain untouched on downgrade.
+
+Vendored LibDBIcon uses `OnUpdate` only during minimap dragging and clears it on drag stop.
 
 ## Validation
 
 ```text
-texluac -p Core.lua UI.lua Minimap.lua tests/test_evidence_model_12_1_5.lua tests/test_bundled_libraries.lua
-texlua tests/test_evidence_model_12_1_5.lua
+texluac -p Core.lua UI.lua Minimap.lua \
+  tests/test_observation_12_1_5.lua \
+  tests/test_bundled_libraries.lua
+texlua tests/test_observation_12_1_5.lua
 texlua tests/test_bundled_libraries.lua
 texlua tests/test_bundled_libraries.lua library-first
+python3 tests/run_mutation_probes.py
 ```
 
-The regression loads all three runtime modules against a mocked WoW API. It checks migration, exact counts, access rejection, post-adoption object isolation, scale/drag deferral, coalesced changes, initialization failures, and the LDB/DBIcon consumer contract. Successful output begins:
+The main regression covers migration, access gating, readable/restricted transitions, stack gains, cap refreshes, losses, coalescing, combat deferral, managed initialization, future-schema preservation, minimap routing, and diagnostics against a mocked WoW API.
 
-```text
-PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender casts become exact counters
-```
+The bundled-library test loads the vendored LibStub, CallbackHandler, LibDataBroker, and LibDBIcon with mocked frames and tests both `PLAYER_LOGIN` orders.
 
-The bundled-library test runs the actual vendored LibStub, CallbackHandler, LDB and LibDBIcon with mocked frames. It covers both login orders, proxy callbacks, show/hide, clicks, tooltips, drag cleanup and repeated embedding. The main regression also checks callback-error containment and future-schema preservation.
-
-The offline regression does not replace live Retail validation of visuals, spell-ID matching, combat behavior, bundled-library behavior, taint, errors, and profiler results. No runtime performance or compatibility pass is claimed by the source-build metadata.
+Live Retail validation is still required for real KM payloads, native rendering, taint, errors, and profiler results.
 
 ## Developer documentation
 

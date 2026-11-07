@@ -2,12 +2,26 @@
 
 local ADDON_NAME, Addon = ...
 Addon.Minimap = Addon.Minimap or {}
-local Minimap = Addon.Minimap
+local MinimapModule = Addon.Minimap
 
 local LDB = LibStub and LibStub:GetLibrary("LibDataBroker-1.1", true)
 local DBIcon = LibStub and LibStub:GetLibrary("LibDBIcon-1.0", true)
 
-function Minimap:CreateLauncher()
+local function AddObservationTooltip(tooltip, snapshot)
+  if snapshot.mode == "exact" then
+    tooltip:AddLine("Exact public-aura observation active", 0.45, 1, 0.45)
+    tooltip:AddDoubleLine("Observed KM applications", tostring(snapshot.observedProcs), 1, 1, 1, 1, 1, 1)
+    tooltip:AddDoubleLine("Stack gains", tostring(snapshot.stackGains), 0.8, 0.8, 0.8, 1, 1, 1)
+    tooltip:AddDoubleLine("Refreshes while capped", tostring(snapshot.capRefreshes), 0.8, 0.8, 0.8, 1, 1, 1)
+    tooltip:AddDoubleLine("Stack losses", tostring(snapshot.stackLosses), 0.8, 0.8, 0.8, 1, 1, 1)
+  else
+    tooltip:AddLine("Blizzard-managed display only", 1, 0.82, 0)
+    tooltip:AddLine("Observation paused: " .. tostring(snapshot.reason), 0.75, 0.75, 0.75, true)
+    tooltip:AddDoubleLine("Recorded before restriction", tostring(snapshot.observedProcs), 0.8, 0.8, 0.8, 1, 1, 1)
+  end
+end
+
+function MinimapModule:CreateLauncher()
   if not LDB or self.launcher then return end
   self.launcher = LDB:NewDataObject(ADDON_NAME, {
     type = "launcher",
@@ -23,19 +37,20 @@ function Minimap:CreateLauncher()
     OnTooltipShow = function(tooltip)
       if not tooltip or type(tooltip.AddLine) ~= "function" then return end
       local snapshot = Addon:GetEvidenceSnapshot()
-      tooltip:AddLine("KM Procs Tracker — evidence-safe")
+      tooltip:AddLine("KM Procs Tracker")
+      AddObservationTooltip(tooltip, snapshot)
+      tooltip:AddLine(" ")
       tooltip:AddDoubleLine("Obliterate casts", tostring(snapshot.obliterateCasts), 1, 1, 1, 1, 1, 1)
       tooltip:AddDoubleLine("Frostscythe casts", tostring(snapshot.frostscytheCasts), 1, 1, 1, 1, 1, 1)
-      tooltip:AddDoubleLine("Total spender casts", tostring(snapshot.spenderCasts), 1, 1, 1, 1, 1, 1)
-      tooltip:AddLine("KM proc/use/expired/overcap counts: unavailable", 1, 0.82, 0, true)
+      tooltip:AddLine("Loss cause is not classified.", 0.75, 0.75, 0.75, true)
       tooltip:AddLine(" ")
       tooltip:AddLine("Left-click: show/hide", 0.8, 0.8, 0.8)
-      tooltip:AddLine("Right-click: reset exact counters", 0.8, 0.8, 0.8)
+      tooltip:AddLine("Right-click: reset counters", 0.8, 0.8, 0.8)
     end,
   })
 end
 
-function Minimap:OnLogin()
+function MinimapModule:OnLogin()
   self:CreateLauncher()
   if not (DBIcon and self.launcher) then return end
   if not self.registered then
@@ -45,7 +60,7 @@ function Minimap:OnLogin()
   self:Refresh()
 end
 
-function Minimap:Refresh()
+function MinimapModule:Refresh()
   if not (DBIcon and self.launcher and self.registered) then return end
   DBIcon:Refresh(ADDON_NAME, Addon:GetDB().minimap)
 end

@@ -1,21 +1,20 @@
 -- KM Procs Tracker runtime owner for Retail 12.1.5.
 --
 -- Evidence contract:
---   * exact: successful player casts with accessible spell IDs;
---   * managed display: Blizzard-owned Killing Machine aura button;
---   * unavailable: proc generation, KM-attributed consumption, expiration,
---     stack count, and overcap. The addon does not infer these from aura data,
---     cooldown-viewer recycling, action-button glows, or overlay frame counts.
+--   * observed KM applications: exact stack gains and observed refreshes at cap,
+--     but only while the concrete KM aura is public and readable;
+--   * exact casts: successful player Obliterate/Frostscythe events;
+--   * managed display: Blizzard owns icon, applications and duration;
+--   * unavailable: exact loss cause and any aura interval hidden by restrictions.
 
 local ADDON_NAME, Addon = ...
 _G[ADDON_NAME] = Addon
 
-Addon.VERSION = "0.5.2"
-Addon.DB_VERSION = 4
+Addon.VERSION = "0.6.0"
+Addon.DB_VERSION = 5
 Addon.DB_NAME = "KMProcsTrackerDB"
 Addon.KM_SPELL_ID = 51124
 
--- Spell-to-counter mapping is independent of Killing Machine presence.
 local COUNTER_BY_SPELL = {
   [49020] = "obliterateCasts",
   [207230] = "frostscytheCasts",
@@ -36,6 +35,12 @@ local DEFAULT_DB = {
   minimap = {
     hide = false,
     minimapPos = 220,
+  },
+  observed = {
+    procs = 0,
+    stackGains = 0,
+    capRefreshes = 0,
+    stackLosses = 0,
   },
   exact = {
     spenderCasts = 0,
@@ -60,30 +65,9 @@ local VALID_POINTS = {
 }
 
 local MAX_EXACT_INTEGER = 9007199254740991
+local EXPIRATION_EPSILON = 0.05
 local EventFrame
-local castsRegistered = false
-
-local function UpdateCastRegistration()
-  local enabled = Addon.db and Addon.db.enabled == true
-  if enabled == castsRegistered then return end
-  if enabled then
-    EventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
-  else
-    EventFrame:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-  end
-  castsRegistered = enabled
-end
-
-local function SaturatingAdd(left, right)
-  local total = left + right
-  if total > MAX_EXACT_INTEGER then return MAX_EXACT_INTEGER end
-  return total
-end
-
-local function IncrementCounter(value)
-  if value >= MAX_EXACT_INTEGER then return MAX_EXACT_INTEGER end
-  return value + 1
-end
+local runtimeEventsRegistered = false
 
 local function CanAccess(value)
   if type(canaccessvalue) == "function" then
@@ -92,6 +76,19 @@ local function CanAccess(value)
   end
   if type(issecretvalue) == "function" then
     local ok, secret = pcall(issecretvalue, value)
+    return ok and secret == false
+  end
+  return false
+end
+
+local function CanAccessTable(value)
+  if not CanAccess(value) or type(value) ~= "table" then return false end
+  if type(canaccesstable) == "function" then
+    local ok, accessible = pcall(canaccesstable, value)
+    return ok and accessible == true
+  end
+  if type(issecrettable) == "function" then
+    local ok, secret = pcall(issecrettable, value)
     return ok and secret == false
   end
   return false
@@ -108,18 +105,36 @@ local function SafeNumber(value)
   return value
 end
 
+local function SafeInteger(value)
+  value = SafeNumber(value)
+  if not value or value ~= math.floor(value) then return nil end
+  return value
+end
+
 local function SafeString(value)
   if not CanAccess(value) or type(value) ~= "string" then return nil end
   return value
 end
 
 local function SafeTable(value)
-  if not CanAccess(value) or type(value) ~= "table" then return nil end
-  if type(issecrettable) == "function" then
-    local ok, secret = pcall(issecrettable, value)
-    if not ok or secret ~= false then return nil end
-  end
+  if not CanAccessTable(value) then return nil end
   return value
+end
+
+local function SafeOptionalNumber(value)
+  if not CanAccess(value) then return false, nil end
+  if value == nil then return true, nil end
+  value = SafeNumber(value)
+  if value == nil then return false, nil end
+  return true, value
+end
+
+local function SafeOptionalInteger(value)
+  if not CanAccess(value) then return false, nil end
+  if value == nil then return true, nil end
+  value = SafeInteger(value)
+  if value == nil then return false, nil end
+  return true, value
 end
 
 local function SafeText(value, fallback)
@@ -134,6 +149,18 @@ local function SafePoint(value, fallback)
   value = SafeString(value)
   if value and VALID_POINTS[value] then return value end
   return fallback
+end
+
+local function SaturatingAdd(left, right)
+  if left >= MAX_EXACT_INTEGER or right >= MAX_EXACT_INTEGER - left then
+    return MAX_EXACT_INTEGER
+  end
+  return left + right
+end
+
+local function IncrementCounter(value, amount)
+  amount = amount or 1
+  return SaturatingAdd(value, amount)
 end
 
 local function MergeDefaults(destination, source)
@@ -153,7 +180,7 @@ end
 
 local function ClampNumber(value, fallback, minimum, maximum)
   value = SafeNumber(value)
-  if not value then return fallback end
+  if value == nil then return fallback end
   if value < minimum then return minimum end
   if value > maximum then return maximum end
   return value
@@ -164,6 +191,28 @@ local function SanitizeCounter(value)
   if not value or value <= 0 then return 0 end
   if value > MAX_EXACT_INTEGER then value = MAX_EXACT_INTEGER end
   return math.floor(value)
+end
+
+local function CopyPreferences(source, destination)
+  local enabled = SafeBoolean(source.enabled)
+  local frame = SafeTable(source.frame)
+  local minimap = SafeTable(source.minimap)
+
+  if enabled ~= nil then destination.enabled = enabled end
+  if frame then
+    destination.frame.point = SafePoint(frame.point, destination.frame.point)
+    destination.frame.relativePoint = SafePoint(frame.relativePoint, destination.frame.relativePoint)
+    destination.frame.x = SafeNumber(frame.x) or destination.frame.x
+    destination.frame.y = SafeNumber(frame.y) or destination.frame.y
+    destination.frame.scale = SafeNumber(frame.scale) or destination.frame.scale
+    local shown = SafeBoolean(frame.shown)
+    if shown ~= nil then destination.frame.shown = shown end
+    destination.frame.locked = SafeBoolean(frame.locked) == true
+  end
+  if minimap then
+    destination.minimap.hide = SafeBoolean(minimap.hide) == true
+    destination.minimap.minimapPos = SafeNumber(minimap.minimapPos) or destination.minimap.minimapPos
+  end
 end
 
 local function SanitizeDB(db)
@@ -183,47 +232,235 @@ local function SanitizeDB(db)
   db.minimap.hide = SafeBoolean(db.minimap.hide) == true
   db.minimap.minimapPos = ClampNumber(db.minimap.minimapPos, 220, 0, 360)
 
+  db.observed = SafeTable(db.observed) or {}
+  db.observed.stackGains = SanitizeCounter(db.observed.stackGains)
+  db.observed.capRefreshes = SanitizeCounter(db.observed.capRefreshes)
+  db.observed.stackLosses = SanitizeCounter(db.observed.stackLosses)
+  db.observed.procs = SaturatingAdd(db.observed.stackGains, db.observed.capRefreshes)
+
   db.exact = SafeTable(db.exact) or {}
   db.exact.obliterateCasts = SanitizeCounter(db.exact.obliterateCasts)
   db.exact.frostscytheCasts = SanitizeCounter(db.exact.frostscytheCasts)
-  -- The aggregate is derived, never trusted independently. This prevents drift
-  -- after interrupted writes, hand-edited SavedVariables, or partial corruption.
   db.exact.spenderCasts = SaturatingAdd(db.exact.obliterateCasts, db.exact.frostscytheCasts)
 
   db.migration = SafeTable(db.migration) or {}
   db.migration.retiredApproximateCounters = SafeBoolean(db.migration.retiredApproximateCounters) == true
 end
 
-local function MigrateLegacy(db)
+local function MigrateDB(db)
   local version = SafeNumber(db.version)
   if version == Addon.DB_VERSION then return db end
 
   local migrated = MergeDefaults({}, DEFAULT_DB)
-  local legacyEnabled = SafeBoolean(db.enabled)
-  local legacyFrame = SafeTable(db.frame)
-  local legacyMinimap = SafeTable(db.minimap)
+  CopyPreferences(db, migrated)
 
-  if legacyEnabled ~= nil then migrated.enabled = legacyEnabled end
-  if legacyFrame then
-    migrated.frame.point = SafePoint(legacyFrame.point, migrated.frame.point)
-    migrated.frame.relativePoint = SafePoint(legacyFrame.relativePoint, migrated.frame.relativePoint)
-    migrated.frame.x = SafeNumber(legacyFrame.x) or migrated.frame.x
-    migrated.frame.y = SafeNumber(legacyFrame.y) or migrated.frame.y
-    migrated.frame.scale = SafeNumber(legacyFrame.scale) or migrated.frame.scale
-    migrated.frame.shown = SafeBoolean(legacyFrame.shown)
-    if migrated.frame.shown == nil then migrated.frame.shown = true end
-    migrated.frame.locked = SafeBoolean(legacyFrame.locked) == true
-  end
-  if legacyMinimap then
-    migrated.minimap.hide = SafeBoolean(legacyMinimap.hide) == true
-    migrated.minimap.minimapPos = SafeNumber(legacyMinimap.minimapPos) or migrated.minimap.minimapPos
+  if version == 4 then
+    local exact = SafeTable(db.exact)
+    if exact then
+      migrated.exact.obliterateCasts = SanitizeCounter(exact.obliterateCasts)
+      migrated.exact.frostscytheCasts = SanitizeCounter(exact.frostscytheCasts)
+    end
+    local migration = SafeTable(db.migration)
+    if migration then
+      migrated.migration.retiredApproximateCounters =
+        SafeBoolean(migration.retiredApproximateCounters) == true
+    end
+  else
+    -- Schemas before v4 used heuristic aura/glow/combat-log counters. They are
+    -- intentionally not promoted into the new observed or exact namespaces.
+    migrated.migration.retiredApproximateCounters = true
   end
 
-  -- Previous Procs/Used/Expired/Overcap values were derived from raw aura,
-  -- overlay, cooldown-viewer, and timing heuristics. They are deliberately not
-  -- copied into the exact successful-cast counters.
-  migrated.migration.retiredApproximateCounters = true
   return migrated
+end
+
+Addon.observation = {
+  mode = "uninitialized",
+  reason = "not-started",
+  hasBaseline = false,
+  present = false,
+  stacks = 0,
+  expirationTime = nil,
+  auraInstanceID = nil,
+  maxStacks = nil,
+}
+
+local function NotifyCountersChanged()
+  if Addon.UI and Addon.UI.UpdateCounters then Addon.UI:UpdateCounters() end
+end
+
+local function ClearObservationBaseline()
+  local observation = Addon.observation
+  observation.hasBaseline = false
+  observation.present = false
+  observation.stacks = 0
+  observation.expirationTime = nil
+  observation.auraInstanceID = nil
+  observation.maxStacks = nil
+end
+
+local function SetObservationMode(mode, reason)
+  local observation = Addon.observation
+  local changed = observation.mode ~= mode or observation.reason ~= reason
+  observation.mode = mode
+  observation.reason = reason
+  if mode ~= "exact" then ClearObservationBaseline() end
+  if changed then NotifyCountersChanged() end
+end
+
+local function ReadMaximumStacks()
+  if not C_Spell or type(C_Spell.GetSpellMaxCumulativeAuraApplications) ~= "function" then
+    return nil
+  end
+  local ok, value = pcall(C_Spell.GetSpellMaxCumulativeAuraApplications, Addon.KM_SPELL_ID)
+  if not ok then return nil end
+  value = SafeInteger(value)
+  if not value or value < 1 or value > 255 then return nil end
+  return value
+end
+
+local function NormalizeAuraSample(aura)
+  local safeAura = SafeTable(aura)
+  if not safeAura then return nil, nil, nil, "aura-table-inaccessible" end
+
+  local applications = SafeInteger(safeAura.applications)
+  if applications == nil or applications < 0 or applications > 255 then
+    return nil, nil, nil, "applications-inaccessible"
+  end
+  if applications < 1 then applications = 1 end
+
+  local expirationOK, expirationTime = SafeOptionalNumber(safeAura.expirationTime)
+  if not expirationOK then return nil, nil, nil, "expiration-inaccessible" end
+
+  local instanceOK, auraInstanceID = SafeOptionalInteger(safeAura.auraInstanceID)
+  if not instanceOK or (auraInstanceID and auraInstanceID < 0) then
+    return nil, nil, nil, "instance-id-inaccessible"
+  end
+
+  return applications, expirationTime, auraInstanceID, nil
+end
+
+local function ReadAuraSample()
+  if not C_Secrets or type(C_Secrets.ShouldSpellAuraBeSecret) ~= "function" then
+    return "unsupported", "missing-secrecy-predicate"
+  end
+  if not C_UnitAuras or type(C_UnitAuras.GetPlayerAuraBySpellID) ~= "function" then
+    return "unsupported", "missing-player-aura-reader"
+  end
+
+  local predicateOK, secret = pcall(C_Secrets.ShouldSpellAuraBeSecret, Addon.KM_SPELL_ID)
+  if not predicateOK then return "unavailable", "secrecy-predicate-error" end
+  secret = SafeBoolean(secret)
+  if secret == nil then return "unavailable", "secrecy-predicate-inaccessible" end
+  if secret then return "restricted", "aura-secret" end
+
+  local queryOK, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, Addon.KM_SPELL_ID)
+  if not queryOK then return "unavailable", "aura-query-error" end
+  if not CanAccess(aura) then return "unavailable", "aura-result-inaccessible" end
+
+  if aura == nil then
+    return "exact", "readable", false, 0, nil, nil
+  end
+
+  -- The secrecy predicate and table gate establish the public path. pcall only
+  -- contains a restriction race during field extraction; it grants no access.
+  local extractOK, stacks, expirationTime, auraInstanceID, failureReason =
+    pcall(NormalizeAuraSample, aura)
+  if not extractOK then return "unavailable", "aura-field-error" end
+  if not stacks then return "unavailable", failureReason end
+  return "exact", "readable", true, stacks, expirationTime, auraInstanceID
+end
+
+local function StoreObservationBaseline(present, stacks, expirationTime, auraInstanceID)
+  local observation = Addon.observation
+  observation.hasBaseline = true
+  observation.present = present
+  observation.stacks = stacks
+  observation.expirationTime = expirationTime
+  observation.auraInstanceID = auraInstanceID
+end
+
+function Addon:ObserveKillingMachine(forceBaseline)
+  if not self.db or not self:IsEnabled() then
+    SetObservationMode("disabled", "addon-disabled")
+    return false
+  end
+
+  local mode, reason, present, stacks, expirationTime, auraInstanceID = ReadAuraSample()
+  if mode ~= "exact" then
+    SetObservationMode(mode, reason)
+    return false
+  end
+
+  local observation = self.observation
+  local enteringExact = observation.mode ~= "exact"
+  observation.mode = "exact"
+  observation.reason = "readable"
+  if enteringExact then
+    ClearObservationBaseline()
+    observation.mode = "exact"
+    observation.reason = "readable"
+  end
+  if forceBaseline or observation.maxStacks == nil then
+    observation.maxStacks = ReadMaximumStacks()
+  end
+
+  if forceBaseline or not observation.hasBaseline then
+    StoreObservationBaseline(present, stacks, expirationTime, auraInstanceID)
+    NotifyCountersChanged()
+    return true
+  end
+
+  -- A replacement instance while continuously present can represent several
+  -- coalesced transitions. Re-baseline rather than manufacture a gain/loss.
+  if observation.present and present
+      and observation.auraInstanceID ~= nil and auraInstanceID ~= nil
+      and observation.auraInstanceID ~= auraInstanceID then
+    StoreObservationBaseline(present, stacks, expirationTime, auraInstanceID)
+    NotifyCountersChanged()
+    return true
+  end
+
+  local observed = self.db.observed
+  local changed = false
+  local delta = stacks - observation.stacks
+
+  if delta > 0 then
+    observed.stackGains = IncrementCounter(observed.stackGains, delta)
+    changed = true
+  elseif delta < 0 then
+    observed.stackLosses = IncrementCounter(observed.stackLosses, -delta)
+    changed = true
+  elseif present and observation.present and stacks > 0
+      and observation.maxStacks and stacks >= observation.maxStacks
+      and expirationTime and observation.expirationTime
+      and expirationTime > observation.expirationTime + EXPIRATION_EPSILON then
+    -- At cap, a later absolute expiration time is an observable refresh. This
+    -- records a lower bound: multiple refreshes coalesced into one UNIT_AURA
+    -- wake-up remain one observed refresh.
+    observed.capRefreshes = IncrementCounter(observed.capRefreshes)
+    changed = true
+  end
+
+  if changed then
+    observed.procs = SaturatingAdd(observed.stackGains, observed.capRefreshes)
+  end
+  StoreObservationBaseline(present, stacks, expirationTime, auraInstanceID)
+  if changed then NotifyCountersChanged() end
+  return true
+end
+
+local function UpdateRuntimeRegistration()
+  local enabled = Addon.db and Addon.db.enabled == true
+  if enabled == runtimeEventsRegistered then return end
+  if enabled then
+    EventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+    EventFrame:RegisterUnitEvent("UNIT_AURA", "player")
+  else
+    EventFrame:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    EventFrame:UnregisterEvent("UNIT_AURA")
+  end
+  runtimeEventsRegistered = enabled
 end
 
 function Addon:GetDB()
@@ -261,18 +498,18 @@ function Addon:InitDB()
   local db = SafeTable(_G[self.DB_NAME])
   local version = db and SafeNumber(db.version)
   self.dbReadOnly = version ~= nil and version > self.DB_VERSION
-  -- A downgrade must not rewrite a schema this version does not understand.
-  -- All consumers receive session-only defaults; the saved root stays untouched.
+
   if self.dbReadOnly then
     db = nil
   elseif db then
-    db = MigrateLegacy(db)
+    db = MigrateDB(db)
   end
   db = MergeDefaults(db, DEFAULT_DB)
   SanitizeDB(db)
   if not self.dbReadOnly then _G[self.DB_NAME] = db end
   self.db = db
-  UpdateCastRegistration()
+  UpdateRuntimeRegistration()
+
   if self.dbReadOnly then
     self:Chat("KMPT: saved data belongs to a newer version; using temporary settings and counters without overwriting it.")
   end
@@ -287,32 +524,54 @@ function Addon:SetEnabled(enabled)
   enabled = enabled == true
   if self.db.enabled == enabled then return end
   self.db.enabled = enabled
-  UpdateCastRegistration()
-  if self.UI and self.UI.SetAuraEnabled then
-    self.UI:SetAuraEnabled(self.db.enabled)
+  UpdateRuntimeRegistration()
+  if self.UI and self.UI.SetAuraEnabled then self.UI:SetAuraEnabled(enabled) end
+  if enabled then
+    self:ObserveKillingMachine(true)
+  else
+    SetObservationMode("disabled", "addon-disabled")
   end
 end
 
 function Addon:GetEvidenceSnapshot()
-  local exact = self.db and self.db.exact or DEFAULT_DB.exact
+  local db = self.db or DEFAULT_DB
+  local observation = self.observation
   return {
-    spenderCasts = exact.spenderCasts or 0,
-    obliterateCasts = exact.obliterateCasts or 0,
-    frostscytheCasts = exact.frostscytheCasts or 0,
+    mode = observation.mode,
+    reason = observation.reason,
+    maxStacks = observation.maxStacks,
+    hasBaseline = observation.hasBaseline,
+    observedProcs = db.observed.procs or 0,
+    stackGains = db.observed.stackGains or 0,
+    capRefreshes = db.observed.capRefreshes or 0,
+    stackLosses = db.observed.stackLosses or 0,
+    spenderCasts = db.exact.spenderCasts or 0,
+    obliterateCasts = db.exact.obliterateCasts or 0,
+    frostscytheCasts = db.exact.frostscytheCasts or 0,
   }
 end
 
 function Addon:ResetCounters()
   if not self.db then return end
-  self.db.exact.spenderCasts = 0
-  self.db.exact.obliterateCasts = 0
-  self.db.exact.frostscytheCasts = 0
-  if self.UI and self.UI.UpdateCounters then self.UI:UpdateCounters() end
-  self:Chat("|cff8bc34aKMPT|r exact spender-cast counters reset.")
+  local observed = self.db.observed
+  observed.procs = 0
+  observed.stackGains = 0
+  observed.capRefreshes = 0
+  observed.stackLosses = 0
+
+  local exact = self.db.exact
+  exact.spenderCasts = 0
+  exact.obliterateCasts = 0
+  exact.frostscytheCasts = 0
+
+  ClearObservationBaseline()
+  if self:IsEnabled() then self:ObserveKillingMachine(true) end
+  NotifyCountersChanged()
+  self:Chat("|cff8bc34aKMPT|r counters reset.")
 end
 
 function Addon:RecordSuccessfulCast(spellID)
-  spellID = SafeNumber(spellID)
+  spellID = SafeInteger(spellID)
   if not spellID or not self:IsEnabled() then return false end
   local counter = COUNTER_BY_SPELL[spellID]
   if not counter then return false end
@@ -320,8 +579,7 @@ function Addon:RecordSuccessfulCast(spellID)
   local exact = self.db.exact
   exact[counter] = IncrementCounter(exact[counter])
   exact.spenderCasts = SaturatingAdd(exact.obliterateCasts, exact.frostscytheCasts)
-
-  if self.UI and self.UI.UpdateCounters then self.UI:UpdateCounters() end
+  NotifyCountersChanged()
   return true
 end
 
@@ -330,6 +588,15 @@ function Addon:SetMinimapHidden(hidden)
   self.db.minimap.hide = hidden == true
   if self.Minimap and self.Minimap.Refresh then self.Minimap:Refresh() end
 end
+
+local MODE_TEXT = {
+  exact = "readable aura observation",
+  restricted = "managed display only (aura restricted)",
+  unsupported = "managed display only (API unavailable)",
+  unavailable = "managed display only (read failed/inaccessible)",
+  disabled = "disabled",
+  uninitialized = "not initialized",
+}
 
 function Addon:SlashCommand(message)
   message = SafeString(message) or ""
@@ -372,12 +639,27 @@ function Addon:SlashCommand(message)
       self:SetMinimapHidden(not self.db.minimap.hide)
     end
   elseif command == "status" then
+    self:ObserveKillingMachine(false)
     local snapshot = self:GetEvidenceSnapshot()
+    local build, interfaceVersion = "?", "?"
+    if type(GetBuildInfo) == "function" then
+      local _, rawBuild, _, rawInterface = GetBuildInfo()
+      build = SafeText(rawBuild, "?")
+      interfaceVersion = SafeText(rawInterface, "?")
+    end
+    local maxStacks = snapshot.maxStacks and tostring(snapshot.maxStacks) or "?"
     self:Chatf(
-      "KMPT exact casts: total=%d obliterate=%d frostscythe=%d; proc/consume/expired/overcap=unavailable",
-      snapshot.spenderCasts,
-      snapshot.obliterateCasts,
-      snapshot.frostscytheCasts
+      "KMPT %s (reason=%s, max=%s, build=%s, interface=%s): observedProcs=%d gains=%d capRefreshes=%d losses=%d; casts=%d",
+      MODE_TEXT[snapshot.mode] or snapshot.mode,
+      snapshot.reason,
+      maxStacks,
+      build,
+      interfaceVersion,
+      snapshot.observedProcs,
+      snapshot.stackGains,
+      snapshot.capRefreshes,
+      snapshot.stackLosses,
+      snapshot.spenderCasts
     )
   else
     self:Chat("KMPT: /kmpt show|hide|toggle|reset|lock|unlock|scale N|minimap show|hide|status")
@@ -386,8 +668,10 @@ end
 
 Addon.Access = {
   CanAccess = CanAccess,
+  CanAccessTable = CanAccessTable,
   SafeBoolean = SafeBoolean,
   SafeNumber = SafeNumber,
+  SafeInteger = SafeInteger,
   SafeString = SafeString,
   SafeTable = SafeTable,
   SafeText = SafeText,
@@ -397,7 +681,11 @@ Addon.Access = {
 EventFrame = CreateFrame("Frame")
 EventFrame:RegisterEvent("ADDON_LOADED")
 EventFrame:RegisterEvent("PLAYER_LOGIN")
+EventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+EventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+EventFrame:RegisterEvent("TRAIT_CONFIG_UPDATED")
+EventFrame:RegisterEvent("ACTIVE_PLAYER_SPECIALIZATION_CHANGED")
 EventFrame:SetScript("OnEvent", function(_, event, ...)
   if event == "ADDON_LOADED" then
     local loadedAddon = ...
@@ -411,8 +699,19 @@ EventFrame:SetScript("OnEvent", function(_, event, ...)
     if not Addon.db then Addon:InitDB() end
     if Addon.UI and Addon.UI.OnLogin then Addon.UI:OnLogin() end
     if Addon.Minimap and Addon.Minimap.OnLogin then Addon.Minimap:OnLogin() end
+    Addon:ObserveKillingMachine(true)
+  elseif event == "PLAYER_ENTERING_WORLD" then
+    if Addon.db then Addon:ObserveKillingMachine(true) end
+  elseif event == "PLAYER_REGEN_DISABLED" then
+    if Addon.db then Addon:ObserveKillingMachine(false) end
+  elseif event == "TRAIT_CONFIG_UPDATED" or event == "ACTIVE_PLAYER_SPECIALIZATION_CHANGED" then
+    if Addon.db then Addon:ObserveKillingMachine(true) end
   elseif event == "PLAYER_REGEN_ENABLED" then
     if Addon.UI and Addon.UI.FlushPending then Addon.UI:FlushPending() end
+    if Addon.db then Addon:ObserveKillingMachine(false) end
+  elseif event == "UNIT_AURA" then
+    local unit = ...
+    if SafeString(unit) == "player" then Addon:ObserveKillingMachine(false) end
   elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
     local unit, _, spellID = ...
     if SafeString(unit) == "player" then Addon:RecordSuccessfulCast(spellID) end

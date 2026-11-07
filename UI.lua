@@ -1,7 +1,6 @@
 -- KM Procs Tracker UI for Retail 12.1.5.
--- The Killing Machine state is rendered by Blizzard's managed AuraContainer.
--- This file never queries aura assignment, visibility, stacks, duration, or
--- managed-button state.
+-- Blizzard owns the managed aura button. Addon-owned counters are structurally
+-- independent and contain only normalized ordinary observations.
 
 local ADDON_NAME, Addon = ...
 Addon.UI = Addon.UI or {}
@@ -15,15 +14,6 @@ local AURA_INIT_PENDING = "pending"
 local AURA_INIT_READY = "ready"
 local AURA_INIT_FAILED = "failed"
 
-local function FailManagedAura(ui, container)
-  if container and type(container.Hide) == "function" then pcall(container.Hide, container) end
-  ui.pendingInit = false
-  ui.pendingAuraEnabled = nil
-  ui.auraInitState = AURA_INIT_FAILED
-  ui.auraUnavailable = true
-  ui.appliedAuraEnabled = nil
-end
-
 local function GetDB()
   return Addon:GetDB()
 end
@@ -31,6 +21,15 @@ end
 local function Round(value)
   if value >= 0 then return math.floor(value + 0.5) end
   return math.ceil(value - 0.5)
+end
+
+local function FailManagedAura(ui, container)
+  if container and type(container.Hide) == "function" then pcall(container.Hide, container) end
+  ui.pendingInit = false
+  ui.pendingAuraEnabled = nil
+  ui.auraInitState = AURA_INIT_FAILED
+  ui.auraUnavailable = true
+  ui.appliedAuraEnabled = nil
 end
 
 local function InitializeManagedButton(button, container)
@@ -75,9 +74,6 @@ function UI:CreateManagedAura()
     return false
   end
 
-  -- Retain the one attempted container before AddAuraSlot. If the API contract
-  -- is unavailable, later enable/apply calls fail closed instead of leaking a
-  -- new frame on every retry.
   self.auraContainer = container
   local configured = pcall(function()
     container:SetAllPoints(self.frame)
@@ -88,15 +84,14 @@ function UI:CreateManagedAura()
     return false
   end
 
-  -- Blizzard invokes this callback through securecallfunction. Its errors do
-  -- not reliably escape AddAuraSlot, so track our own setup result explicitly.
+  -- Blizzard contains initializeFrame failures through securecallfunction, so
+  -- AddAuraSlot returning a button is not sufficient proof of complete setup.
   local initialized = false
   local options = {
     initializeFrame = function(button)
       initialized = pcall(InitializeManagedButton, button, container)
     end,
     candidateFilters = {
-      -- 51128 is the passive talent, not the timed proc aura.
       includeSpellIDs = { [Addon.KM_SPELL_ID] = true },
     },
     sortMethod = AuraContainerSortMethod and AuraContainerSortMethod.Default or nil,
@@ -154,16 +149,18 @@ function UI:CreateFrame()
   placeholder:SetAlpha(0.20)
   placeholder:SetDesaturated(true)
 
-  -- An ordinary sibling of the managed container keeps cast text above its
-  -- icon/cooldown without retaining or mutating any adopted aura child.
+  -- Independent ordinary layer: no anchor or parent relation to the adopted
+  -- AuraButton and no managed-object readback.
   local counterFrame = CreateFrame("Frame", nil, frame)
+  self.counterFrame = counterFrame
   counterFrame:SetAllPoints(frame)
   counterFrame:SetFrameLevel(frame:GetFrameLevel() + 5)
   counterFrame:EnableMouse(false)
-  local exactText = counterFrame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
-  self.exactText = exactText
-  exactText:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
-  exactText:SetText("0")
+
+  local observedText = counterFrame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+  self.observedText = observedText
+  observedText:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
+  observedText:SetText("-")
 
   frame:SetScript("OnEnter", function() UI:ShowTooltip(frame) end)
   frame:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
@@ -205,11 +202,9 @@ function UI:SavePosition()
   if not point or not relativePoint or not x or not y then return end
 
   local db = GetDB()
+  local scale = self.appliedScale or 1
   db.frame.point = point
   db.frame.relativePoint = relativePoint
-  -- Persist offsets in UIParent units, independent of the current icon scale.
-  -- Use the applied scale: a combat-deferred setting may already have changed.
-  local scale = self.appliedScale or 1
   db.frame.x = Round(x * scale)
   db.frame.y = Round(y * scale)
 end
@@ -221,7 +216,9 @@ function UI:ApplyDB()
   end
 
   self:CreateFrame()
+  if not self.frame then return end
   self:StopMoving()
+
   local db = GetDB()
   self.pendingApply = false
   self.appliedScale = db.frame.scale
@@ -297,11 +294,14 @@ function UI:SetAuraEnabled(enabled)
 end
 
 function UI:UpdateCounters()
-  if not self.exactText then return end
-  local total = GetDB().exact.spenderCasts
-  if self.displayedCastCount == total then return end
-  self.displayedCastCount = total
-  self.exactText:SetText(tostring(total))
+  if not self.observedText then return end
+  local db = GetDB()
+  local mode = Addon.observation and Addon.observation.mode or "uninitialized"
+  local text = mode == "exact" and tostring(db.observed.procs) or "-"
+  local key = mode .. ":" .. text
+  if self.displayedCounterKey == key then return end
+  self.displayedCounterKey = key
+  self.observedText:SetText(text)
 end
 
 function UI:SetShown(shown)
@@ -328,23 +328,40 @@ function UI:AdjustScale(delta)
   self:ApplyDB()
 end
 
+local function AddObservationTooltip(tooltip, snapshot)
+  if snapshot.mode == "exact" then
+    tooltip:AddLine("Mode: readable public-aura observation", 0.45, 1, 0.45)
+    tooltip:AddDoubleLine("Observed KM applications", tostring(snapshot.observedProcs), 1, 1, 1, 1, 1, 1)
+    if snapshot.maxStacks then
+      tooltip:AddDoubleLine("Public maximum stacks", tostring(snapshot.maxStacks), 0.8, 0.8, 0.8, 1, 1, 1)
+    end
+    tooltip:AddDoubleLine("  stack gains", tostring(snapshot.stackGains), 0.8, 0.8, 0.8, 1, 1, 1)
+    tooltip:AddDoubleLine("  refreshes while capped", tostring(snapshot.capRefreshes), 0.8, 0.8, 0.8, 1, 1, 1)
+    tooltip:AddDoubleLine("Observed stack losses", tostring(snapshot.stackLosses), 0.8, 0.8, 0.8, 1, 1, 1)
+    tooltip:AddLine("Cap refreshes are a lower bound if updates coalesce.", 0.7, 0.7, 0.7, true)
+  else
+    tooltip:AddLine("Mode: Blizzard-managed display only", 1, 0.82, 0)
+    tooltip:AddLine("Exact aura observation paused: " .. tostring(snapshot.reason), 0.75, 0.75, 0.75, true)
+    tooltip:AddDoubleLine("Recorded before restriction", tostring(snapshot.observedProcs), 0.8, 0.8, 0.8, 1, 1, 1)
+  end
+end
+
 function UI:ShowTooltip(owner)
   if not GameTooltip then return end
   local snapshot = Addon:GetEvidenceSnapshot()
   GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
-  GameTooltip:AddLine("KM Procs Tracker — evidence-safe")
+  GameTooltip:AddLine("KM Procs Tracker")
+  AddObservationTooltip(GameTooltip, snapshot)
+  GameTooltip:AddLine(" ")
   GameTooltip:AddLine("Exact successful player casts", 0.7, 0.9, 1)
   GameTooltip:AddDoubleLine("Obliterate", tostring(snapshot.obliterateCasts), 1, 1, 1, 1, 1, 1)
   GameTooltip:AddDoubleLine("Frostscythe", tostring(snapshot.frostscytheCasts), 1, 1, 1, 1, 1, 1)
   GameTooltip:AddDoubleLine("Total spender casts", tostring(snapshot.spenderCasts), 1, 1, 1, 1, 1, 1)
   GameTooltip:AddLine(" ")
-  GameTooltip:AddLine("Killing Machine aura: Blizzard-managed display", 0.7, 0.9, 1)
+  GameTooltip:AddLine("Loss cause is not claimed as consumed or expired.", 0.75, 0.75, 0.75, true)
   if self.auraUnavailable then
-    GameTooltip:AddLine("Managed AuraContainer unavailable on this client", 1, 0.3, 0.3)
+    GameTooltip:AddLine("Managed AuraContainer failed on this client.", 1, 0.3, 0.3, true)
   end
-  GameTooltip:AddLine("Not observable as exact addon metrics:", 1, 0.82, 0)
-  GameTooltip:AddLine("proc count, KM-attributed use, expiration, overcap, stacks", 0.75, 0.75, 0.75, true)
-  GameTooltip:AddLine(" ")
   GameTooltip:AddLine("Right-click: menu  •  drag while unlocked", 0.7, 0.7, 0.7)
   GameTooltip:Show()
 end
@@ -357,7 +374,7 @@ function UI:ShowContextMenu()
       root:CreateButton(Addon:IsEnabled() and "Disable" or "Enable", function()
         Addon:SetEnabled(not Addon:IsEnabled())
       end)
-      root:CreateButton("Reset exact cast counters", function() Addon:ResetCounters() end)
+      root:CreateButton("Reset counters", function() Addon:ResetCounters() end)
       root:CreateButton(db.frame.locked and "Unlock movement" or "Lock movement", function()
         db.frame.locked = not db.frame.locked
         UI:ApplyDB()

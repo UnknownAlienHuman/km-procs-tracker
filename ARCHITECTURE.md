@@ -2,88 +2,111 @@
 
 ## Target
 
-Retail `12.1.5`, Interface `120105`, inspected source baseline `12.1.5.70783` (`Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`). Client validation is **NOT-RUN**.
+Retail `12.1.5`, Interface `120105`, addon `0.6.0`, inspected Blizzard source `12.1.5.70783` at `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`. Live-client matrix: **NOT-RUN**.
 
 ## Ownership
 
-`Core.lua` owns schema migration, sanitization, the secret-value access boundary, exact successful-cast counters, shared icon lookup, commands, and event routing.
+- `Core.lua`: SavedVariables schema/migration, access gates, runtime mode selection, exact normalized aura observations, successful-cast counters, commands, and event routing.
+- `UI.lua`: addon root, one managed AuraContainer slot, ordinary counter layer, movement/scale/menu/tooltip, and combat-deferred UI mutations.
+- `Minimap.lua`: LDB/LibDBIcon launcher.
+- Blizzard: aura acquisition, filtering, managed assignment, current applications, duration, secrecy, and native refresh.
 
-`UI.lua` owns the addon frame, one Blizzard `CustomAuraContainer`, position/scale/lock state, tooltip/menu, and combat-deferred application.
+No addon code retains or reads the adopted AuraButton after initialization.
 
-`Minimap.lua` owns the LibDataBroker/LibDBIcon launcher. An LDB launcher can exist without DBIcon; absent libraries do not affect the tracker or slash commands.
-
-Blizzard owns every Killing Machine aura fact: assignment, visibility, count, duration, refresh, and secret state.
-
-## Load graph
+## Observation pipeline
 
 ```text
-KMProcsTracker.toc
-  -> bundled LibStub / CallbackHandler / LibDataBroker / LibDBIcon
-  -> Core.lua
-  -> UI.lua
-  -> Minimap.lua
+UNIT_AURA(player) / world, combat, talent or specialization transition
+  -> discard payload
+  -> ShouldSpellAuraBeSecret(51124)
+       true/inaccessible/error -> managed-only mode + clear baseline
+       false
+         -> GetPlayerAuraBySpellID(51124)
+         -> gate table and consumed fields
+         -> normalize ordinary sample
+         -> baseline or compare with previous ordinary sample
 ```
 
-`Blizzard_AuraContainer` is required.
+The raw getter is a narrow public adapter, not a generic aura scanner. It is never called when the current predicate says the aura is secret.
 
-## Evidence model
+## Normalized sample
 
-### Exact
+Only ordinary values survive the adapter:
 
-An accessible `UNIT_SPELLCAST_SUCCEEDED` event for `player` whose integral spell ID is Obliterate (`49020`) or Frostscythe (`207230`). The claim is only “successful player cast,” never “Killing Machine consumed.”
+```text
+present
+applications (0 normalized to one for a present aura)
+expirationTime?
+auraInstanceID?
+maxStacks?  <- C_Spell.GetSpellMaxCumulativeAuraApplications(51124)
+```
 
-### Blizzard-managed display
+No AuraData table, event payload, duration object, secret value, or managed child is retained.
 
-One `CustomAuraContainerTemplate` slot filters player `HELPFUL` auras to the proc aura `51124`, not passive talent `51128`. The initialization callback binds icon, application-count, and duration-cooldown sinks. Addon code never reads the managed button afterward.
+## Counter semantics
 
-### Unavailable
+```text
+stackGains     += max(0, newApplications - oldApplications)
+stackLosses    += max(0, oldApplications - newApplications)
+capRefreshes   += 1 when:
+                  same applications
+                  + applications >= public maxStacks
+                  + later absolute expirationTime
+observedProcs   = stackGains + capRefreshes
+```
 
-Proc generation, KM-attributed use, expiration, overcap/waste, and current stacks. They are not inferred or represented as numeric zero.
+`observedProcs` is a readable lower bound, not reconstructed ground truth across restricted intervals. Multiple cap refreshes coalesced into one update remain one observed refresh.
 
-## Persistent schema
+A replacement `auraInstanceID` while both samples are present is ambiguous; it re-baselines without manufacturing a gain or loss.
 
-Schema v4 stores bounded UI preferences, minimap state, enabled state, exact Obliterate/Frostscythe counts, their derived total, and the legacy-retirement marker.
+Loss causality is intentionally separate. Obliterate/Frostscythe casts are exact successful casts, but they do not prove which readable loss they caused, especially across event ordering, refreshes, or multi-stack consumption mechanics.
 
-Sanitization repairs invalid frame anchors, rejects inaccessible/non-finite values, clamps coordinates/scale/minimap angle, and recomputes the aggregate exact counter.
-
-Legacy heuristic counters and backend state are discarded rather than relabelled as exact data. A fresh install does not set the legacy-retirement marker. A schema newer than v4 is preserved without modification. Runtime-only `dbReadOnly` selects isolated session defaults for every consumer; a chat notice explains that changes will not be saved.
-
-## Managed lifecycle
+## Mode state
 
 ```text
 uninitialized
-  -> pending   (combat lockdown)
-  -> ready     (one container + one slot)
-  -> failed    (contract unavailable; fail closed until reload)
+  -> exact       public predicate false and sample normalized
+  -> restricted  predicate true
+  -> unsupported required public symbol absent
+  -> unavailable predicate/query/value inaccessible or failed
+  -> disabled    addon disabled
 ```
 
-A failed `AddAuraSlot` attempt retains its container reference and state so repeated enable/layout calls cannot leak frames. Disabling a pending display cancels its deferred creation.
+Every transition into `exact` starts with a baseline. Every transition out clears the baseline. This prevents a hidden interval from being bridged by subtraction.
 
-The selected [frame provider](https://github.com/Gethe/wow-ui-source/blob/297d7aaaa736f346b3e036f38ee088eaf7f8c07f/Interface/AddOns/Blizzard_AuraContainer/Blizzard_AuraContainerFrameProviders.lua) invokes `initializeFrame` via `securecallfunction`. The addon catches errors inside its own initializer and requires an explicit success flag before entering `ready`; a non-nil slot return alone is not proof of completed setup.
+## Persistence
 
-The addon never calls `AuraContainer:UpdateAllAuras`; Blizzard event handling owns refresh.
+Schema 5 stores:
 
-## Combat and layout boundary
+```text
+version / enabled
+frame.* / minimap.*
+observed.stackGains / capRefreshes / stackLosses / derived procs
+exact.obliterateCasts / frostscytheCasts / derived spenderCasts
+migration.retiredApproximateCounters
+```
 
-Tracker/managed creation, managed enable-state changes, and layout mutation defer while `InCombatLockdown()` is true. `PLAYER_REGEN_ENABLED` flushes the coalesced pending state. A drag ending in combat defers both `StopMovingOrSizing` and position capture; the applied scale, not a pending setting, determines its saved offsets.
+Migration from schema 4 preserves UI/minimap preferences and exact cast counters. Older heuristic counters are discarded. A newer schema is never rewritten; the session uses detached defaults.
 
-The ordinary root scales its entire hierarchy. Stored offsets are in UIParent units and are divided by scale when applied. Exact cast text belongs to an ordinary sibling of the managed container at a higher frame level. It has no anchor to a managed object and never inspects adopted children. Exact text updates remain allowed during combat.
+## Managed display lifecycle
+
+```text
+uninitialized -> pending (combat) -> ready
+                             \-> failed (one attempt, fail closed until reload)
+```
+
+`initializeFrame` configures only icon, application-count, cooldown, and static glow descendants. Because Blizzard invokes it through `securecallfunction`, the addon records explicit callback completion instead of trusting `AddAuraSlot` alone.
 
 ## Runtime cost
 
-- one player `UNIT_SPELLCAST_SUCCEEDED` registration while enabled, removed while disabled;
-- bootstrap event registrations removed after use;
+- one player `UNIT_AURA` wake-up registration while enabled;
+- one player `UNIT_SPELLCAST_SUCCEEDED` registration while enabled;
+- one exact spell-specific re-query per wake-up while the predicate permits it;
 - one managed aura slot;
-- no per-cast snapshot allocation or unchanged counter-text writes;
-- no tracker `OnUpdate` or ticker; vendored LibDBIcon owns a transient minimap drag update, removed on drag stop;
-- no raw aura or combat-log event;
-- no frame-tree/action-bar scan;
-- no manual refresh loop.
+- no polling/ticker/tracker `OnUpdate`;
+- no raw combat log or frame scanning;
+- counter text writes only when mode/value changes.
 
 ## Evidence limit
 
-The deterministic harness loads all three runtime modules. It checks migration, access rejection, event ownership, exact counting, combat/drag deferral, scale-independent settings, native managed sinks, enable/disable behavior, aggregate reconciliation, fail-closed initialization, and the LDB/DBIcon consumer contract. Managed child methods deliberately fail after adoption in the harness.
-
-`tests/test_bundled_libraries.lua` additionally runs the actual vendored libraries in both login orders against mocked frames, including proxy callbacks, launcher controls, drag cleanup and repeated embedding.
-
-Neither harness is the WoW VM or renderer. Live visuals, spell-ID matching, taint, library behavior, and profiler results require the named Retail build.
+Offline tests prove deterministic addon logic against mocks. They do not prove the live value of `ShouldSpellAuraBeSecret(51124)`, client event coalescing, real rendering, protected execution, taint, or CPU/allocation behavior.

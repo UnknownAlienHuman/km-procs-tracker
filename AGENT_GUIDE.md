@@ -7,156 +7,104 @@
 3. `UI.lua`
 4. `Minimap.lua`
 5. `ARCHITECTURE.md`
-6. `tests/test_evidence_model_12_1_5.lua`
+6. `tests/test_observation_12_1_5.lua`
 7. `tests/test_bundled_libraries.lua`
-8. `UnknownAlienHuman/wow-addon-engineering-kb`
+8. `UnknownAlienHuman/wow-addon-engineering-kb`: security, spell secrecy, auras, events, persistence, performance
 
-## Target contract
+## Target
 
 - Retail / Midnight `12.1.5`
 - Interface `120105`
-- addon version `0.5.2`
-- inspected source baseline `12.1.5.70783`; client validation **NOT-RUN**
-- source snapshot `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
+- addon `0.6.0`, DB schema 5
+- inspected source `12.1.5.70783` / `297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
+- client matrix **NOT-RUN**
 - required Blizzard dependency `Blizzard_AuraContainer`
 - no GitHub Actions workflow
 
 ## Product contract
 
-The addon has three evidence classes:
+1. Always provide a Blizzard-managed Killing Machine display for buff aura `51124`.
+2. When the current public predicate confirms that `51124` is non-secret, observe its exact readable application transitions.
+3. When it is restricted/inaccessible/unsupported, pause raw observation and retain managed display only.
+4. Keep successful Obliterate/Frostscythe casts as separate exact evidence.
+5. Never label a stack loss as consumed/expired without a source that proves causality.
 
-1. **Exact:** accessible successful player casts of Obliterate (`49020`) and Frostscythe (`207230`).
-2. **Managed display:** Blizzard-owned Killing Machine aura icon, count, and duration.
-3. **Unavailable:** proc count, KM-attributed consumption, expiration, overcap/waste, and current stacks.
-
-Never replace `unavailable` with zero, a best guess, or a hidden inferred counter.
-
-## Ownership
-
-`Core.lua` is the only SavedVariables, event, command, exact-counter, and shared icon-lookup owner. It unregisters bootstrap events after use and cast events while disabled.
-
-`UI.lua` is the only tracker-frame and managed AuraContainer owner.
-
-`Minimap.lua` is the only LDB/LibDBIcon owner.
-
-Blizzard owns aura assignment, visibility, stack count, duration, refresh, and secrecy.
-
-## Hard prohibitions
-
-Do not reintroduce these as state or counting backends:
+## Required access order
 
 ```text
-UNIT_AURA
-C_UnitAuras / UnitAura / AuraUtil.ForEachAura
-COMBAT_LOG_EVENT_UNFILTERED
-SpellActivationOverlay or action-button glow inference
-Cooldown Viewer frame scanning or hooks
-GetChildren / GetNumChildren scans
-simulated Killing Machine stacks
-spender/proc timing windows
-attack-speed credit buckets
-Pillar/ERW proc budgets
-OnUpdate or ticker polling
-manual AuraContainer:UpdateAllAuras calls
+ShouldSpellAuraBeSecret(51124)
+  -> gate returned bool
+  -> only false permits GetPlayerAuraBySpellID(51124)
+  -> gate returned value/table
+  -> gate each consumed field
+  -> normalize to ordinary scalars
+  -> compare/persist/render
 ```
 
-Presentation signals are not exact proc evidence. Managed aura state remains opaque.
+`UNIT_AURA` is a wake-up. Ignore its update payload. A failed `pcall` maps to unavailable and clears the baseline; it is not a capability probe or retry signal.
 
-## Access boundary
+## Observation rules
 
-The access decision must precede type checks, comparisons, conversion, formatting, indexing, or persistence of game-returned values. Unknown or failing access predicates reject the value. `pcall` contains errors; it does not authorize secret-value access.
+- count positive application deltas as stack gains;
+- count negative deltas as cause-independent stack losses;
+- count a same-stack refresh only at the accessible public maximum and only when absolute expiration increases;
+- derive `observed.procs = stackGains + capRefreshes`;
+- describe it as observed/lower-bound data;
+- re-baseline after any restricted/unsupported/unavailable interval, world entry, reset, or ambiguous live instance replacement;
+- never bridge a hidden interval by subtraction.
 
-`UNIT_SPELLCAST_SUCCEEDED` counts only when:
+## Managed display rules
 
-- `unit == "player"` is accessible;
-- `spellID` is accessible, finite, integral, and equals a supported spender ID;
-- the addon is enabled.
-
-## SavedVariables
-
-Schema v4 stores only:
-
-```text
-version
- enabled
-frame.point / relativePoint / x / y / scale / shown / locked
-minimap.hide / minimapPos
-exact.obliterateCasts
-exact.frostscytheCasts
-exact.spenderCasts
-migration.retiredApproximateCounters
-```
-
-`exact.spenderCasts` is derived from the two spell counters during sanitization and updates. Do not trust or mutate it independently.
-
-Legacy approximate counters and backend state are intentionally discarded. Preserve only bounded frame/minimap preferences and `enabled`. A fresh install must not claim a legacy migration. A future schema must remain untouched: use isolated session defaults, set the runtime-only `dbReadOnly` flag, and notify the user. Never pass the future saved table to UI or library writers.
-
-## Managed AuraContainer
-
-`UI:CreateManagedAura` creates one `CustomAuraContainerTemplate` outside combat:
+One `CustomAuraContainerTemplate` slot:
 
 ```text
 unit = player
 slot = killing_machine
 filter = HELPFUL
-candidateFilters.includeSpellIDs = { [51124]=true }
+candidateFilters.includeSpellIDs = { [51124] = true }
 ```
 
-`51128` is the passive talent, not an alternate proc aura.
+`51128` is the passive/talent spell, not the displayed proc aura.
 
-The initialization callback configures only native sinks:
+During `initializeFrame` configure only:
 
-- `SetIcon`
-- `SetApplicationCount`
-- `SetDurationCooldown`
-- static addon glow art
+- `SetIcon`;
+- `SetApplicationCount`;
+- `SetDurationCooldown`;
+- static glow art.
 
-Do not retain or inspect the managed AuraButton after initialization.
+Do not retain/read/reparent/repool the managed AuraButton or descendants after adoption. Do not call `UpdateAllAuras` manually.
 
-Initialization is a one-shot state machine: `uninitialized -> pending|ready|failed`. A contract failure is retained as `failed` until `/reload`; repeated UI application must not allocate more containers.
-
-Require an explicit successful `initializeFrame` result: Blizzard contains callback errors via `securecallfunction`, so an `AddAuraSlot` return alone is insufficient. The result records construction, never aura state.
-
-Do not manually refresh the container. `SetUnit`, `AddAuraSlot`, `SetEnabled`, and Blizzard events own its lifecycle.
-
-## Combat and UI
-
-Tracker/managed creation, managed enable-state changes, tracker layout, and drag completion defer during `InCombatLockdown()` and flush on `PLAYER_REGEN_ENABLED`.
-
-Scale the ordinary root, not adopted children. Persist offsets independently of scale. Finish a deferred drag using the applied scale before applying a pending scale setting.
-
-Exact cast text lives on an independent addon-owned layer above the managed display. It can update during combat without touching protected aura state. Keep its hot update allocation-free apart from the displayed string and skip unchanged text.
-
-## Commands
+## Prohibited backends
 
 ```text
-/kmpt
-/kmpt show|hide
-/kmpt toggle
-/kmpt reset
-/kmpt lock|unlock
-/kmpt scale 0.60..3.00
-/kmpt minimap show|hide
-/kmpt status
+COMBAT_LOG_EVENT_UNFILTERED
+SpellActivationOverlay/action-button glow inference
+Cooldown Viewer or child-frame scans
+GetChildren/GetNumChildren visibility inference
+simulated stacks or proc budgets
+spender timing attribution
+attack-speed token buckets
+polling, ticker, tracker OnUpdate
+managed geometry/readback
 ```
+
+## Persistence
+
+Schema 5 aggregates are derived, never trusted independently. Migrate schema 4 exact cast counters; discard pre-v4 heuristic metrics. Preserve future-schema roots untouched.
 
 ## Verification
 
 ```text
-texluac -p Core.lua UI.lua Minimap.lua tests/test_evidence_model_12_1_5.lua tests/test_bundled_libraries.lua
-texlua tests/test_evidence_model_12_1_5.lua
+texluac -p Core.lua UI.lua Minimap.lua \
+  tests/test_observation_12_1_5.lua \
+  tests/test_bundled_libraries.lua
+texlua tests/test_observation_12_1_5.lua
 texlua tests/test_bundled_libraries.lua
 texlua tests/test_bundled_libraries.lua library-first
+python3 tests/run_mutation_probes.py
 ```
 
-Successful output begins:
+Static review must find no combat-log, overlay, Cooldown Viewer, frame-scan, polling, or manual managed-refresh path in addon-owned runtime files.
 
-```text
-PASS: Retail 12.1.5 managed display stays opaque; only accessible player spender casts become exact counters
-```
-
-Static review of tracker code must find no raw aura, combat-log, overlay, Cooldown Viewer, child-frame scan, polling, or manual `UpdateAllAuras` path.
-
-The bundled-library test permits the library-owned minimap drag `OnUpdate` only between drag start and stop; it must not become a tracker-state backend.
-
-Live-client gates remain mandatory for the named build: managed KM visuals and spell-ID matching, enable/disable, combat deferral, reload/migration, drag/scale/minimap, bundled libraries, taint, Lua errors, and CPU/allocation behavior. Source-build metadata is not a runtime PASS.
+Live gates: `/kmpt status`, readable and restricted contexts, 0→1→2 stack transitions, cap refresh, stack loss, combat/world transitions, reload/migration, drag/scale/minimap, taint/errors, and profiler results.
